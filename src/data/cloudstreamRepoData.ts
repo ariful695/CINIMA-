@@ -1,0 +1,2072 @@
+export interface RawCloudStreamPlugin {
+  name: string;
+  featured?: boolean;
+  disabled?: boolean;
+}
+
+export interface RawCloudStreamRepo {
+  id: string;
+  name: string;
+  icon?: string;
+  iconBg?: string;
+  badge?: string;
+  tags?: string[];
+  shortcodes?: string[];
+  directInstall: string;
+  webpage?: string;
+  community?: string;
+  description?: string;
+  plugins: RawCloudStreamPlugin[];
+}
+
+export const CLOUDSTREAM_DIRECTORY_REPOS: RawCloudStreamRepo[] = [
+  {
+    "id": "cspr",
+    "name": "CloudStream Providers",
+    "icon": "☁️",
+    "iconBg": "rgba(108,99,255,0.15)",
+    "badge": "Official",
+    "tags": [
+      "official",
+      "english"
+    ],
+    "shortcodes": [
+      "cspr",
+      "0094"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/recloudstream/extensions/master/repo.json",
+    "webpage": "https://github.com/recloudstream/extensions",
+    "description": "The only official CloudStream repository maintained by the core team.",
+    "plugins": [
+      {
+        "name": "Dailymotion"
+      },
+      {
+        "name": "Invidious",
+        "featured": true
+      },
+      {
+        "name": "Twitch"
+      }
+    ]
+  },
+  {
+    "id": "mega",
+    "name": "Mega Repository",
+    "icon": "🔥",
+    "iconBg": "rgba(251,113,133,0.15)",
+    "badge": "Multi-lang",
+    "tags": [
+      "multilang",
+      "english"
+    ],
+    "shortcodes": [
+      "megarepo",
+      "3737"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/self-similarity/MegaRepo/builds/repo.json",
+    "webpage": "https://github.com/self-similarity/MegaRepo/",
+    "description": "The \"Mega\" plugin adds ALL repositories each time the app is opened. Uninstall after one run if you do not want all repositories.",
+    "plugins": [
+      {
+        "name": "Mega"
+      }
+    ]
+  },
+  {
+    "id": "phisher",
+    "name": "Phisher Repo",
+    "icon": "🎬",
+    "iconBg": "rgba(251,191,36,0.15)",
+    "badge": "Multi-lang",
+    "tags": [
+      "multilang",
+      "english",
+      "hindi"
+    ],
+    "shortcodes": [
+      "phisherrepo",
+      "864"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/phisher98/cloudstream-extensions-phisher/refs/heads/builds/repo.json",
+    "webpage": "https://github.com/phisher98/cloudstream-extensions-phisher",
+    "community": "https://discord.gg/",
+    "description": "Plugins in Hindi, English, and other languages of India. Huge collection of sources.",
+    "plugins": [
+      {
+        "name": "AllMovieLand"
+      },
+      {
+        "name": "AllWish"
+      },
+      {
+        "name": "Anichi"
+      },
+      {
+        "name": "Animeav1"
+      },
+      {
+        "name": "AnimeCloud"
+      },
+      {
+        "name": "AnimeDekho"
+      },
+      {
+        "name": "AnimeKai"
+      },
+      {
+        "name": "AnimekHor"
+      },
+      {
+        "name": "Animenosub"
+      },
+      {
+        "name": "AnimePahe"
+      },
+      {
+        "name": "Animesalt"
+      },
+      {
+        "name": "AnimeWorld"
+      },
+      {
+        "name": "Animexin"
+      },
+      {
+        "name": "Animez"
+      },
+      {
+        "name": "AniWatch"
+      },
+      {
+        "name": "Aniworld"
+      },
+      {
+        "name": "BanglaPlex"
+      },
+      {
+        "name": "Cinemacity"
+      },
+      {
+        "name": "Coflix"
+      },
+      {
+        "name": "Desicinemas"
+      },
+      {
+        "name": "Donghuastream"
+      },
+      {
+        "name": "DoraBash"
+      },
+      {
+        "name": "DramaFull"
+      },
+      {
+        "name": "DudeFilms"
+      },
+      {
+        "name": "Fibwatch"
+      },
+      {
+        "name": "Filmycab"
+      },
+      {
+        "name": "Filmyfiy"
+      },
+      {
+        "name": "Fivemovierulz"
+      },
+      {
+        "name": "FourKHDHub"
+      },
+      {
+        "name": "Funmovieslix"
+      },
+      {
+        "name": "Goojara"
+      },
+      {
+        "name": "HDhub4u"
+      },
+      {
+        "name": "HiAnime"
+      },
+      {
+        "name": "Hindmoviez"
+      },
+      {
+        "name": "Idlix"
+      },
+      {
+        "name": "IPTVPlayer"
+      },
+      {
+        "name": "IStreamFlare"
+      },
+      {
+        "name": "Jellyfin"
+      },
+      {
+        "name": "Kaido"
+      },
+      {
+        "name": "KayiFamilyTv"
+      },
+      {
+        "name": "Kickassanime"
+      },
+      {
+        "name": "Kisskh"
+      },
+      {
+        "name": "Latanime"
+      },
+      {
+        "name": "LayarKaca"
+      },
+      {
+        "name": "MassTamilan"
+      },
+      {
+        "name": "Megakino"
+      },
+      {
+        "name": "MovieBlast"
+      },
+      {
+        "name": "MovieBox"
+      },
+      {
+        "name": "Movierulzhd"
+      },
+      {
+        "name": "Movies4u"
+      },
+      {
+        "name": "MPlayer"
+      },
+      {
+        "name": "MultiMovies"
+      },
+      {
+        "name": "Netcinez"
+      },
+      {
+        "name": "NOXX"
+      },
+      {
+        "name": "OHLI24"
+      },
+      {
+        "name": "OnePace"
+      },
+      {
+        "name": "OneTouchTV"
+      },
+      {
+        "name": "Pelisplushd"
+      },
+      {
+        "name": "Pencurimovie"
+      },
+      {
+        "name": "Pinoymoviepedia"
+      },
+      {
+        "name": "PublicSportsIPTV"
+      },
+      {
+        "name": "QuickIPTV"
+      },
+      {
+        "name": "RingZ"
+      },
+      {
+        "name": "ShowBox"
+      },
+      {
+        "name": "ShowFlix"
+      },
+      {
+        "name": "StreamPlay",
+        "featured": true
+      },
+      {
+        "name": "StremioAddon"
+      },
+      {
+        "name": "StremioX"
+      },
+      {
+        "name": "SuperStream",
+        "featured": true
+      },
+      {
+        "name": "Tamilblasters"
+      },
+      {
+        "name": "Tamilian"
+      },
+      {
+        "name": "Telugumv"
+      },
+      {
+        "name": "Tennistream"
+      },
+      {
+        "name": "TokusatsuUltimate"
+      },
+      {
+        "name": "TokuZilla"
+      },
+      {
+        "name": "ToonHub"
+      },
+      {
+        "name": "Toonstream"
+      },
+      {
+        "name": "ToonTales"
+      },
+      {
+        "name": "Topcartoons"
+      },
+      {
+        "name": "Topstreamfilm"
+      },
+      {
+        "name": "TorraStream"
+      },
+      {
+        "name": "UHDmovies"
+      },
+      {
+        "name": "Ultima",
+        "featured": true
+      },
+      {
+        "name": "UltimaBeta"
+      },
+      {
+        "name": "Watch32"
+      },
+      {
+        "name": "WatchMMAFull"
+      },
+      {
+        "name": "XDMovies"
+      },
+      {
+        "name": "Yflix",
+        "featured": true
+      },
+      {
+        "name": "YTS"
+      }
+    ]
+  },
+  {
+    "id": "megix",
+    "name": "Megix Repo",
+    "icon": "🇮🇳",
+    "iconBg": "rgba(249,115,22,0.15)",
+    "badge": "Hindi & English",
+    "tags": [
+      "hindi",
+      "english"
+    ],
+    "shortcodes": [
+      "csx",
+      "3670"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/SaurabhKaperwan/CSX/builds/CS.json",
+    "webpage": "https://github.com/SaurabhKaperwan/CSX/",
+    "description": "Hindi and English content with a great selection of movie and streaming sources.",
+    "plugins": [
+      {
+        "name": "Bollyflix"
+      },
+      {
+        "name": "CineStream",
+        "featured": true
+      },
+      {
+        "name": "GDIndex"
+      },
+      {
+        "name": "MoviesDrive"
+      },
+      {
+        "name": "Moviesmod"
+      },
+      {
+        "name": "NetflixMirror"
+      },
+      {
+        "name": "OnlineMoviesHindit"
+      },
+      {
+        "name": "VegaMovies"
+      }
+    ]
+  },
+  {
+    "id": "3rabi",
+    "name": "3rabi عربي",
+    "icon": "🌙",
+    "iconBg": "rgba(251,191,36,0.12)",
+    "badge": "Arabic",
+    "tags": [
+      "arabic"
+    ],
+    "shortcodes": [
+      "arb",
+      "343"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/Abodabodd/re-3arabi/refs/heads/main/repo",
+    "webpage": "https://github.com/Abodabodd/re-3arabi/",
+    "description": "Comprehensive Arabic repository with movies, series, anime and local content.",
+    "plugins": [
+      {
+        "name": "Anime4up"
+      },
+      {
+        "name": "Ohatv"
+      },
+      {
+        "name": "Dima toon"
+      },
+      {
+        "name": "Tuktukcima"
+      },
+      {
+        "name": "Cimawbas"
+      },
+      {
+        "name": "Syrialive"
+      },
+      {
+        "name": "VIU"
+      },
+      {
+        "name": "Tuniflix"
+      },
+      {
+        "name": "Cimatn"
+      },
+      {
+        "name": "Anime3rbtest"
+      },
+      {
+        "name": "Cee",
+        "disabled": true
+      },
+      {
+        "name": "Anime3rb"
+      },
+      {
+        "name": "YouTube"
+      },
+      {
+        "name": "LodyNet"
+      },
+      {
+        "name": "WeCima"
+      },
+      {
+        "name": "TopCinema"
+      },
+      {
+        "name": "FullMatchShows"
+      },
+      {
+        "name": "Brstej"
+      },
+      {
+        "name": "AnimeWitcher"
+      },
+      {
+        "name": "Egydead"
+      },
+      {
+        "name": "Mycima"
+      },
+      {
+        "name": "Animeiat",
+        "disabled": true
+      },
+      {
+        "name": "Asia2tv 2"
+      },
+      {
+        "name": "Asia2tv"
+      },
+      {
+        "name": "Akwam"
+      },
+      {
+        "name": "3isk"
+      },
+      {
+        "name": "Eshek"
+      },
+      {
+        "name": "Krmzy"
+      },
+      {
+        "name": "Animerco"
+      },
+      {
+        "name": "Witanime"
+      },
+      {
+        "name": "Shahid4u"
+      },
+      {
+        "name": "CimaClub"
+      },
+      {
+        "name": "Faselhd"
+      },
+      {
+        "name": "Cimanaw"
+      },
+      {
+        "name": "Arabseed"
+      },
+      {
+        "name": "Shabakaty Cimanana",
+        "disabled": true
+      }
+    ]
+  },
+  {
+    "id": "indostream",
+    "name": "IndoStream Repo",
+    "icon": "🌴",
+    "iconBg": "rgba(16,185,129,0.12)",
+    "badge": "Indonesian",
+    "tags": [
+      "indonesian"
+    ],
+    "shortcodes": [
+      "indos",
+      "2149"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/TeKuma25/IndoStream/builds/repo.json",
+    "webpage": "https://github.com/TeKuma25/IndoStream?tab=readme-ov-file",
+    "description": "Indonesian repository with a wide selection of anime and local drama content.",
+    "plugins": [
+      {
+        "name": "Animasu"
+      },
+      {
+        "name": "AnimeIndo"
+      },
+      {
+        "name": "AnimeSail"
+      },
+      {
+        "name": "Anoboy"
+      },
+      {
+        "name": "Dramaid"
+      },
+      {
+        "name": "DramaSerial"
+      },
+      {
+        "name": "Dubbindo"
+      },
+      {
+        "name": "Dutamovie"
+      },
+      {
+        "name": "Funmovieslix"
+      },
+      {
+        "name": "Gomov"
+      },
+      {
+        "name": "Gomunime",
+        "disabled": true
+      },
+      {
+        "name": "Idlix"
+      },
+      {
+        "name": "IndoTV"
+      },
+      {
+        "name": "Kuramanime"
+      },
+      {
+        "name": "Kuronime"
+      },
+      {
+        "name": "LayarKaca"
+      },
+      {
+        "name": "Minioppai"
+      },
+      {
+        "name": "Nekopoi"
+      },
+      {
+        "name": "Neonime"
+      },
+      {
+        "name": "Ngefilm"
+      },
+      {
+        "name": "Nimegami"
+      },
+      {
+        "name": "Nodrakorid"
+      },
+      {
+        "name": "NontonAnimeID",
+        "disabled": true
+      },
+      {
+        "name": "Oploverz"
+      },
+      {
+        "name": "Otakudesu"
+      },
+      {
+        "name": "Pencurimovie"
+      },
+      {
+        "name": "Pusatfilm"
+      },
+      {
+        "name": "Raveeflix"
+      },
+      {
+        "name": "Rebahin"
+      },
+      {
+        "name": "Samehadaku"
+      }
+    ]
+  },
+  {
+    "id": "extcloud",
+    "name": "ExtCloud Repo",
+    "icon": "⚡",
+    "iconBg": "rgba(99,102,241,0.15)",
+    "badge": "Indonesian",
+    "tags": [
+      "indonesian"
+    ],
+    "shortcodes": [
+      "extcloud"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/duro92/ExtCloud/main/repo.json",
+    "webpage": "https://github.com/duro92/ExtCloud",
+    "description": "Indonesian repository with extensive anime and streaming plugin coverage.",
+    "plugins": [
+      {
+        "name": "AnichinMoe"
+      },
+      {
+        "name": "Animasu"
+      },
+      {
+        "name": "AnimeSail"
+      },
+      {
+        "name": "Anoboy"
+      },
+      {
+        "name": "AutoEmbed"
+      },
+      {
+        "name": "Azmovies"
+      },
+      {
+        "name": "Donghub"
+      },
+      {
+        "name": "Dramabox"
+      },
+      {
+        "name": "Dutamovie"
+      },
+      {
+        "name": "FilmApik"
+      },
+      {
+        "name": "Filmkita"
+      },
+      {
+        "name": "Fufafilm"
+      },
+      {
+        "name": "Funmovieslix"
+      },
+      {
+        "name": "Hidoristream"
+      },
+      {
+        "name": "Idlix"
+      },
+      {
+        "name": "Kawanfilm"
+      },
+      {
+        "name": "Kissasian"
+      },
+      {
+        "name": "Kisskh"
+      },
+      {
+        "name": "Klikxxi"
+      },
+      {
+        "name": "Layarasia"
+      },
+      {
+        "name": "LayarKaca"
+      },
+      {
+        "name": "Melongmovie"
+      },
+      {
+        "name": "Midasxxi"
+      },
+      {
+        "name": "MovieBox"
+      },
+      {
+        "name": "Ngefilm"
+      },
+      {
+        "name": "Nomat"
+      },
+      {
+        "name": "NontonAnimeID"
+      },
+      {
+        "name": "Oploverz"
+      },
+      {
+        "name": "Oppadrama"
+      },
+      {
+        "name": "Otakudesu"
+      },
+      {
+        "name": "Pencurimovie"
+      },
+      {
+        "name": "Pmsm"
+      },
+      {
+        "name": "Reelshort"
+      },
+      {
+        "name": "Samehadaku"
+      },
+      {
+        "name": "Sflix"
+      },
+      {
+        "name": "SoraStream"
+      },
+      {
+        "name": "Winbu"
+      }
+    ]
+  },
+  {
+    "id": "cloudx",
+    "name": "CloudX Repository",
+    "icon": "🌐",
+    "iconBg": "rgba(14,165,233,0.14)",
+    "badge": "Indonesian",
+    "tags": [
+      "indonesian"
+    ],
+    "shortcodes": [
+      "cloudx"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/Asm0d3usX/CloudX/builds/repo.json",
+    "webpage": "https://github.com/Asm0d3usX/CloudX",
+    "description": "Indonesian-focused repository with movies, dramas, and streaming plugins.",
+    "plugins": [
+      {
+        "name": "Dutamovie"
+      },
+      {
+        "name": "Filmkita"
+      },
+      {
+        "name": "Filmlokal"
+      },
+      {
+        "name": "Fufafilm"
+      },
+      {
+        "name": "Funmovieslix"
+      },
+      {
+        "name": "Idlix"
+      },
+      {
+        "name": "Indomax"
+      },
+      {
+        "name": "Kawanfilm"
+      },
+      {
+        "name": "KlikXXi"
+      },
+      {
+        "name": "LayarKaca"
+      },
+      {
+        "name": "LayarWarna"
+      },
+      {
+        "name": "MidasXXi"
+      },
+      {
+        "name": "Moviebox"
+      },
+      {
+        "name": "Ngefilm"
+      },
+      {
+        "name": "Nomat"
+      },
+      {
+        "name": "Nontonfilm"
+      },
+      {
+        "name": "Oploverz"
+      },
+      {
+        "name": "Pencurimovie"
+      },
+      {
+        "name": "Pusatfilm"
+      },
+      {
+        "name": "Pusatmovie"
+      },
+      {
+        "name": "Samehadaku"
+      },
+      {
+        "name": "Sarangfilm"
+      },
+      {
+        "name": "Savefilm"
+      },
+      {
+        "name": "WGFilm21"
+      }
+    ]
+  },
+  {
+    "id": "dogior",
+    "name": "doGior's Had Enough",
+    "icon": "🎭",
+    "iconBg": "rgba(236,72,153,0.12)",
+    "badge": "Italian & Global",
+    "tags": [
+      "multilang",
+      "english"
+    ],
+    "shortcodes": [
+      "gior",
+      "1740"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/doGior/doGiorsHadEnough/refs/heads/builds/repo.json",
+    "webpage": "https://github.com/doGior/doGiorsHadEnough",
+    "description": "A mix of Italian, English, and international streaming plugins and live TV sources.",
+    "plugins": [
+      {
+        "name": "AltaDefinizione"
+      },
+      {
+        "name": "AnimeUnity"
+      },
+      {
+        "name": "AnimeWorld"
+      },
+      {
+        "name": "Arte"
+      },
+      {
+        "name": "CalcioStreaming"
+      },
+      {
+        "name": "CB01",
+        "disabled": true
+      },
+      {
+        "name": "CorsaroNero"
+      },
+      {
+        "name": "DaddyLive",
+        "disabled": true
+      },
+      {
+        "name": "Huhu"
+      },
+      {
+        "name": "IPTV"
+      },
+      {
+        "name": "Nebula"
+      },
+      {
+        "name": "Simkl"
+      },
+      {
+        "name": "StreamingCommunity"
+      },
+      {
+        "name": "Torrentio",
+        "disabled": true
+      },
+      {
+        "name": "TV"
+      },
+      {
+        "name": "YouTube"
+      }
+    ]
+  },
+  {
+    "id": "cncverse",
+    "name": "CNC Verse Repository",
+    "icon": "🎵",
+    "iconBg": "rgba(139,92,246,0.14)",
+    "badge": "Multi-lang",
+    "tags": [
+      "multilang",
+      "hindi",
+      "english"
+    ],
+    "shortcodes": [
+      "cncv"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/NivinCNC/CNCVerse-Cloud-Stream-Extension/refs/heads/builds/CNC.json",
+    "webpage": "https://github.com/NivinCNC/CNCVerse-Cloud-Stream-Extension",
+    "description": "A diverse repository covering Indian, Tamil, and global streaming content.",
+    "plugins": [
+      {
+        "name": "Bilibili"
+      },
+      {
+        "name": "CastleTv"
+      },
+      {
+        "name": "CineTv"
+      },
+      {
+        "name": "CNC Verse"
+      },
+      {
+        "name": "Cricify"
+      },
+      {
+        "name": "DesiSerials"
+      },
+      {
+        "name": "DoFlix"
+      },
+      {
+        "name": "Einthusan"
+      },
+      {
+        "name": "GoldenAudiobook"
+      },
+      {
+        "name": "HDO",
+        "disabled": true
+      },
+      {
+        "name": "HDrezka"
+      },
+      {
+        "name": "LibriVoxAudiobook"
+      },
+      {
+        "name": "MovieBox"
+      },
+      {
+        "name": "MovieBoxProviderIN"
+      },
+      {
+        "name": "Moviezwap"
+      },
+      {
+        "name": "Pikashow"
+      },
+      {
+        "name": "RadioIndia"
+      },
+      {
+        "name": "Rtally"
+      },
+      {
+        "name": "SKTech"
+      },
+      {
+        "name": "StreamFlix"
+      },
+      {
+        "name": "SunGo"
+      },
+      {
+        "name": "TamilDhool"
+      },
+      {
+        "name": "Tamilian"
+      },
+      {
+        "name": "TamilUltra"
+      },
+      {
+        "name": "Watch32"
+      },
+      {
+        "name": "Xon"
+      }
+    ]
+  },
+  {
+    "id": "diegon",
+    "name": "DieGon / ItaliaInStreaming",
+    "icon": "🇮🇹",
+    "iconBg": "rgba(0,140,69,0.14)",
+    "badge": "Italian",
+    "tags": [
+      "italian",
+      "multilang"
+    ],
+    "shortcodes": [
+      "diegon7"
+    ],
+    "directInstall": "https://pastebin.com/raw/qndZtL6D",
+    "webpage": "https://github.com/DieGon7771/ItaliaInStreaming",
+    "community": "https://t.me/",
+    "description": "Italian repository with a rich selection of local streaming, anime and sports sources.",
+    "plugins": [
+      {
+        "name": "AltaDefinizione"
+      },
+      {
+        "name": "AnimeSaturn"
+      },
+      {
+        "name": "AnimeUnity"
+      },
+      {
+        "name": "AnimeWorld"
+      },
+      {
+        "name": "Arte"
+      },
+      {
+        "name": "CalcioStreaming"
+      },
+      {
+        "name": "GB01",
+        "disabled": true
+      },
+      {
+        "name": "CorsaroNero"
+      },
+      {
+        "name": "GuardaSerie"
+      },
+      {
+        "name": "Huhu"
+      },
+      {
+        "name": "IlGenioDelloStreaming"
+      },
+      {
+        "name": "SectionOrganizer"
+      },
+      {
+        "name": "StreamingCommunity"
+      },
+      {
+        "name": "Stremio"
+      },
+      {
+        "name": "SyncStream"
+      },
+      {
+        "name": "Torrentio"
+      },
+      {
+        "name": "TV"
+      }
+    ]
+  },
+  {
+    "id": "cskarma",
+    "name": "cs-karma",
+    "icon": "🏟️",
+    "iconBg": "rgba(234,88,12,0.14)",
+    "badge": "Multi-lang",
+    "tags": [
+      "multilang",
+      "english"
+    ],
+    "shortcodes": [
+      "cskarma"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/Kraptor123/cs-Karma/refs/heads/master/repo.json",
+    "webpage": "https://github.com/Kraptor123/Cs-Karma",
+    "description": "Multi-language repository focused on sports, anime, drama and international content.",
+    "plugins": [
+      {
+        "name": "7ebtv",
+        "disabled": true
+      },
+      {
+        "name": "AnimeAV"
+      },
+      {
+        "name": "AnimeYTX"
+      },
+      {
+        "name": "BasketballReplays"
+      },
+      {
+        "name": "BasketballVideo",
+        "disabled": true
+      },
+      {
+        "name": "CinemaCity"
+      },
+      {
+        "name": "CricHD",
+        "disabled": true
+      },
+      {
+        "name": "DocumentaryArea"
+      },
+      {
+        "name": "DoramasLatinoX"
+      },
+      {
+        "name": "Dramaizle"
+      },
+      {
+        "name": "Dubbindo"
+      },
+      {
+        "name": "Esheaq"
+      },
+      {
+        "name": "F1FullRaces"
+      },
+      {
+        "name": "Filmatek"
+      },
+      {
+        "name": "Filmmirasim"
+      },
+      {
+        "name": "Flixlatam"
+      },
+      {
+        "name": "Footballia"
+      },
+      {
+        "name": "Full4kizle"
+      },
+      {
+        "name": "FullMatchShows"
+      },
+      {
+        "name": "FullRaces"
+      },
+      {
+        "name": "FullReplays",
+        "disabled": true
+      },
+      {
+        "name": "Gnulahd"
+      },
+      {
+        "name": "GoodShort",
+        "disabled": true
+      },
+      {
+        "name": "Henaojara"
+      },
+      {
+        "name": "Iwatchtheoffice"
+      },
+      {
+        "name": "JPFilms"
+      },
+      {
+        "name": "KissKH"
+      },
+      {
+        "name": "Krmzy"
+      },
+      {
+        "name": "Latanime"
+      },
+      {
+        "name": "LayarKaca"
+      },
+      {
+        "name": "NbaReplay",
+        "disabled": true
+      },
+      {
+        "name": "Soccerfullmatch",
+        "disabled": true
+      },
+      {
+        "name": "Streamed"
+      },
+      {
+        "name": "Subsplease"
+      },
+      {
+        "name": "Supercartoons"
+      },
+      {
+        "name": "TokyBook"
+      },
+      {
+        "name": "TVGarden"
+      },
+      {
+        "name": "WatchWrestling"
+      },
+      {
+        "name": "Wcoflix"
+      },
+      {
+        "name": "WebCric"
+      },
+      {
+        "name": "YoTurkish"
+      }
+    ]
+  },
+  {
+    "id": "cakestwix",
+    "name": "CakesTwix (Ukrainian)",
+    "icon": "🇺🇦",
+    "iconBg": "rgba(0,91,187,0.14)",
+    "badge": "Ukrainian",
+    "tags": [
+      "multilang"
+    ],
+    "shortcodes": [
+      "cakes"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/CakesTwix/cloudstream-extensions-uk/master/repo.json",
+    "webpage": "https://codeberg.org/CakesTwix/cloudstream-extensions-uk/",
+    "description": "Ukrainian providers repository with local and international streaming content.",
+    "plugins": []
+  },
+  {
+    "id": "sarapcanagii",
+    "name": "DiziPal & TabiiSpor",
+    "icon": "🇹🇷",
+    "iconBg": "rgba(227,10,23,0.12)",
+    "badge": "Turkish",
+    "tags": [
+      "turkish"
+    ],
+    "shortcodes": [
+      "sarapcanagii"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/sarapcanagii/Pitipitii/master/repo.json",
+    "webpage": "https://github.com/sarapcanagii/Pitipitii",
+    "description": "Turkish repository for sports and TV series streaming.",
+    "plugins": [
+      {
+        "name": "NeonSpor"
+      }
+    ]
+  },
+  {
+    "id": "lawlietrepo",
+    "name": "lawlietrepo",
+    "icon": "🇧🇷",
+    "iconBg": "rgba(0,156,59,0.14)",
+    "badge": "Brazilian",
+    "tags": [
+      "multilang"
+    ],
+    "shortcodes": [],
+    "directInstall": "https://raw.githubusercontent.com/lawlietbr/lietrepo/refs/heads/main/builds/repo.json",
+    "webpage": "https://github.com/lawlietbr/lietrepo",
+    "description": "Brazilian Portuguese repository with anime and local streaming sources.",
+    "plugins": [
+      {
+        "name": "AnimeFire"
+      },
+      {
+        "name": "AniTube"
+      },
+      {
+        "name": "CineAgora"
+      },
+      {
+        "name": "DattebayoBR"
+      },
+      {
+        "name": "Doramogo"
+      },
+      {
+        "name": "EmbedTV"
+      },
+      {
+        "name": "Goyabu"
+      },
+      {
+        "name": "MendigoFlix"
+      }
+    ]
+  },
+  {
+    "id": "king",
+    "name": "King",
+    "icon": "👑",
+    "iconBg": "rgba(251,191,36,0.14)",
+    "badge": "IPTV",
+    "tags": [
+      "multilang"
+    ],
+    "shortcodes": [
+      "kingl"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/KingLucius/cs-extensions/master/repo.json",
+    "webpage": "https://github.com/KingLucius/cs-extensions",
+    "description": "XtreamIPTV is the only plugin — requires an Xtream code and account to access live IPTV categories.",
+    "plugins": [
+      {
+        "name": "XtreamIPTV"
+      }
+    ]
+  },
+  {
+    "id": "italianprovider",
+    "name": "Italian Providers Repository",
+    "icon": "🍕",
+    "iconBg": "rgba(0,140,69,0.12)",
+    "badge": "Italian",
+    "tags": [
+      "italian"
+    ],
+    "shortcodes": [
+      "ipr"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/Gian-Fr/ItalianProvider/builds/repo.json",
+    "webpage": "https://github.com/Gian-Fr/ItalianProvider/",
+    "description": "Italian providers repository with popular local streaming sources.",
+    "plugins": [
+      {
+        "name": "Altadefinizione"
+      },
+      {
+        "name": "GuardaSerie"
+      }
+    ]
+  },
+  {
+    "id": "netmirror",
+    "name": "Netmirror Repo",
+    "icon": "🎥",
+    "iconBg": "rgba(229,9,20,0.14)",
+    "badge": "OTT Mirrors",
+    "tags": [
+      "english",
+      "multilang"
+    ],
+    "shortcodes": [
+      "Netmirror"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/Sushan64/NetMirror-Extension/refs/heads/builds/Netflix.json",
+    "webpage": "https://github.com/Sushan64/NetMirror-Extension/",
+    "description": "Provides Netflix, Disney Plus, Hotstar, and Prime Video mirror sources.",
+    "plugins": [
+      {
+        "name": "Netflix"
+      },
+      {
+        "name": "Disney+"
+      },
+      {
+        "name": "Hotstar"
+      },
+      {
+        "name": "Prime Video"
+      }
+    ]
+  },
+  {
+    "id": "redowan",
+    "name": "Redowan's BDIX Repository",
+    "icon": "🇧🇩",
+    "iconBg": "rgba(0,106,78,0.14)",
+    "badge": "Bangladeshi",
+    "tags": [
+      "multilang"
+    ],
+    "shortcodes": [
+      "redowan"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/redowan99/Redowan-CloudStream/master/repo.json",
+    "webpage": "https://github.com/redowan99/Redowan-CloudStream/",
+    "description": "BDIX-focused Bangladeshi repository with local TV, movies and sports replay content.",
+    "plugins": [
+      {
+        "name": "9kMovies"
+      },
+      {
+        "name": "BdixBdipTV"
+      },
+      {
+        "name": "BdixCircleftp"
+      },
+      {
+        "name": "BdixCloudTV"
+      },
+      {
+        "name": "BdixDflix"
+      },
+      {
+        "name": "BdixDhakaFlix"
+      },
+      {
+        "name": "BdixICCFtp"
+      },
+      {
+        "name": "BdixMyMovieBazarTV"
+      },
+      {
+        "name": "BdixRoarZoneTV"
+      },
+      {
+        "name": "EmwBD"
+      },
+      {
+        "name": "FootReplays"
+      },
+      {
+        "name": "FullReplays"
+      },
+      {
+        "name": "FullyMaza"
+      },
+      {
+        "name": "MoviPK"
+      },
+      {
+        "name": "Mp4Moviez"
+      },
+      {
+        "name": "TheMoviesFlix"
+      },
+      {
+        "name": "WatchMoviesPk"
+      }
+    ]
+  },
+  {
+    "id": "saimuel",
+    "name": "Saimuel Repo",
+    "icon": "🇧🇷",
+    "iconBg": "rgba(0,156,59,0.12)",
+    "badge": "Brazilian",
+    "tags": [
+      "multilang"
+    ],
+    "shortcodes": [
+      "saim"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/saimuelbr/saimuelrepo/refs/heads/main/builds/repo.json",
+    "webpage": "https://github.com/saimuelbr/saimuelrepo/",
+    "community": "https://discord.gg/",
+    "description": "Brazilian repository with a wide range of anime, films, and streaming sources.",
+    "plugins": [
+      {
+        "name": "NetCine"
+      },
+      {
+        "name": "PobreFlix"
+      },
+      {
+        "name": "Streamberry"
+      },
+      {
+        "name": "TopFilmes"
+      },
+      {
+        "name": "AnimesCloud"
+      },
+      {
+        "name": "EmbedTVOnline"
+      },
+      {
+        "name": "NovelasFlix"
+      },
+      {
+        "name": "MegaFlix"
+      },
+      {
+        "name": "GoFlix"
+      },
+      {
+        "name": "UltraCine"
+      },
+      {
+        "name": "BetterAnime"
+      },
+      {
+        "name": "DonghuaNoSekai"
+      },
+      {
+        "name": "Doramas"
+      },
+      {
+        "name": "Anroll",
+        "disabled": true
+      },
+      {
+        "name": "FilmesOn"
+      },
+      {
+        "name": "AnimesDigital"
+      },
+      {
+        "name": "OverFlix"
+      },
+      {
+        "name": "VisionCine"
+      }
+    ]
+  },
+  {
+    "id": "cuxplug",
+    "name": "CuxPlug",
+    "icon": "🌍",
+    "iconBg": "rgba(16,185,129,0.12)",
+    "badge": "International",
+    "tags": [
+      "multilang",
+      "english"
+    ],
+    "shortcodes": [
+      "CuxPlug"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/ycngmn/CuxPlug/refs/heads/main/repo.json",
+    "webpage": "https://github.com/ycngmn/CuxPlug",
+    "description": "International plugins developed from interest and fun — covering anime, French, German and Indian sources.",
+    "plugins": [
+      {
+        "name": "AnimeLuxe"
+      },
+      {
+        "name": "AnimeSama"
+      },
+      {
+        "name": "AniZone"
+      },
+      {
+        "name": "Flixmet"
+      },
+      {
+        "name": "FreeDriveMovie"
+      },
+      {
+        "name": "FrenchStream"
+      },
+      {
+        "name": "StreamCloud"
+      },
+      {
+        "name": "Watch32"
+      }
+    ]
+  },
+  {
+    "id": "vietnamese",
+    "name": "CloudStream Vietnamese",
+    "icon": "🇻🇳",
+    "iconBg": "rgba(218,37,29,0.12)",
+    "badge": "Vietnamese",
+    "tags": [
+      "multilang"
+    ],
+    "shortcodes": [
+      "viet"
+    ],
+    "directInstall": "https://gitlab.com/tearrs/cloudstream-vietnamese/-/raw/main/repo.json",
+    "webpage": "https://gitlab.com/tearrs/cloudstream-vietnamese/-/tree/code",
+    "community": "https://t.me/",
+    "description": "Vietnamese repository with local streaming, IPTV and sync features.",
+    "plugins": [
+      {
+        "name": "Cross-Device Sync"
+      },
+      {
+        "name": "Fshare"
+      },
+      {
+        "name": "IPTV"
+      },
+      {
+        "name": "MonPlayer"
+      },
+      {
+        "name": "ViStream"
+      },
+      {
+        "name": "XtreamIPTV"
+      },
+      {
+        "name": "Stremio"
+      }
+    ]
+  },
+  {
+    "id": "turkish",
+    "name": "Turkish Providers | @kraptor123",
+    "icon": "🇹🇷",
+    "iconBg": "rgba(227,10,23,0.14)",
+    "badge": "Turkish",
+    "tags": [
+      "turkish"
+    ],
+    "shortcodes": [
+      "kraptorcs"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/Kraptor123/cs-kraptor/master/repo.json",
+    "webpage": "https://github.com/Kraptor123/cs-kraptor/",
+    "community": "https://t.me/",
+    "description": "The most comprehensive Turkish repository with hundreds of local TV, series, anime and film sources.",
+    "plugins": [
+      {
+        "name": "AnimeciX"
+      },
+      {
+        "name": "Animeler"
+      },
+      {
+        "name": "Animely"
+      },
+      {
+        "name": "Anizium"
+      },
+      {
+        "name": "AsyaAnimeleri"
+      },
+      {
+        "name": "AsyaFanatiklerim"
+      },
+      {
+        "name": "AsyaMinik"
+      },
+      {
+        "name": "AsyaWatch"
+      },
+      {
+        "name": "BelgeselX"
+      },
+      {
+        "name": "BirAsyaDizi",
+        "disabled": true
+      },
+      {
+        "name": "CizgiMax"
+      },
+      {
+        "name": "CizgiveDizi"
+      },
+      {
+        "name": "Ddizi"
+      },
+      {
+        "name": "DiziAsia"
+      },
+      {
+        "name": "DiziAsya"
+      },
+      {
+        "name": "DiziBox"
+      },
+      {
+        "name": "DiziFilmORG"
+      },
+      {
+        "name": "DiziGom"
+      },
+      {
+        "name": "DiziKorea"
+      },
+      {
+        "name": "DiziLife"
+      },
+      {
+        "name": "Dizilla"
+      },
+      {
+        "name": "DiziMag"
+      },
+      {
+        "name": "DiziMom"
+      },
+      {
+        "name": "DiziPal"
+      },
+      {
+        "name": "DiziPalOrijinal"
+      },
+      {
+        "name": "DiziWatch",
+        "disabled": true
+      },
+      {
+        "name": "DiziYo"
+      },
+      {
+        "name": "DiziYou"
+      },
+      {
+        "name": "FilmEkseni"
+      },
+      {
+        "name": "FilmHane"
+      },
+      {
+        "name": "FilmMakinesi"
+      },
+      {
+        "name": "FilmModu"
+      },
+      {
+        "name": "Filmzal"
+      },
+      {
+        "name": "FlixHQ"
+      },
+      {
+        "name": "FullHDFilmizlesene"
+      },
+      {
+        "name": "FullHDIzle",
+        "disabled": true
+      },
+      {
+        "name": "GinikoCanli"
+      },
+      {
+        "name": "HDFilmCehennemi"
+      },
+      {
+        "name": "HDFilmDelisi"
+      },
+      {
+        "name": "HDFilmizle"
+      },
+      {
+        "name": "HintDizi"
+      },
+      {
+        "name": "InatBox"
+      },
+      {
+        "name": "JetFilmizle"
+      },
+      {
+        "name": "KanalD",
+        "disabled": true
+      },
+      {
+        "name": "KickTR"
+      },
+      {
+        "name": "KoreanTurk"
+      },
+      {
+        "name": "KraptorPlus"
+      },
+      {
+        "name": "KultFilmler"
+      },
+      {
+        "name": "MirrorVerse"
+      },
+      {
+        "name": "OnePaceTr"
+      },
+      {
+        "name": "OpenAnime"
+      },
+      {
+        "name": "RareFilmm"
+      },
+      {
+        "name": "RecTV",
+        "disabled": true
+      },
+      {
+        "name": "SeiCode"
+      },
+      {
+        "name": "SelcukFlix"
+      },
+      {
+        "name": "SetFilmIzle"
+      },
+      {
+        "name": "SezonlukDizi"
+      },
+      {
+        "name": "SinemaCX"
+      },
+      {
+        "name": "SineWix"
+      },
+      {
+        "name": "Sinezy"
+      },
+      {
+        "name": "TrAnimeIzle"
+      },
+      {
+        "name": "TurkAnime"
+      },
+      {
+        "name": "Turkdizileri"
+      },
+      {
+        "name": "TvDiziler"
+      },
+      {
+        "name": "UgurFilm"
+      },
+      {
+        "name": "Watch2Movies"
+      },
+      {
+        "name": "WebDramaTurkey"
+      },
+      {
+        "name": "Webtelzale",
+        "disabled": true
+      },
+      {
+        "name": "YabanciDizi"
+      },
+      {
+        "name": "YeniKaynak"
+      },
+      {
+        "name": "YeniWatch",
+        "disabled": true
+      },
+      {
+        "name": "YesilCamTv"
+      },
+      {
+        "name": "Youtube",
+        "featured": true
+      },
+      {
+        "name": "YTS"
+      }
+    ]
+  },
+  {
+    "id": "german",
+    "name": "German Providers Repository",
+    "icon": "🇩🇪",
+    "iconBg": "rgba(221,0,0,0.12)",
+    "badge": "German",
+    "tags": [
+      "german"
+    ],
+    "shortcodes": [
+      "gpr"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/Bnyro/GermanProviders/refs/heads/master/repo.json",
+    "webpage": "https://github.com/Bnyro/GermanProviders/",
+    "description": "German-language repository with public broadcasters, streaming sites and IPTV.",
+    "plugins": [
+      {
+        "name": "ARD"
+      },
+      {
+        "name": "Arte"
+      },
+      {
+        "name": "C3TV"
+      },
+      {
+        "name": "Discovery"
+      },
+      {
+        "name": "EinschaltenIn"
+      },
+      {
+        "name": "FilmPalast"
+      },
+      {
+        "name": "HDFilme"
+      },
+      {
+        "name": "IptvOrg"
+      },
+      {
+        "name": "Kinoger"
+      },
+      {
+        "name": "Megakino"
+      },
+      {
+        "name": "Moflix"
+      },
+      {
+        "name": "Netzkino"
+      },
+      {
+        "name": "Serienstream"
+      },
+      {
+        "name": "Southpark"
+      },
+      {
+        "name": "SpiegelTV"
+      },
+      {
+        "name": "Xcine"
+      }
+    ]
+  },
+  {
+    "id": "luna712",
+    "name": "Luna712 Extensions",
+    "icon": "🌕",
+    "iconBg": "rgba(167,139,250,0.12)",
+    "badge": "Multi-lang",
+    "tags": [
+      "multilang",
+      "english"
+    ],
+    "shortcodes": [
+      "luna712"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/Luna712/Luna712-CloudStream-Extensions/28885d17ceb7f24782b732b6056085c14c1fd027/repo.json",
+    "webpage": "https://github.com/Luna712/Luna712-CloudStream-Extensions/",
+    "description": "Small repository providing archive and video platform integrations.",
+    "plugins": [
+      {
+        "name": "Dailymotion",
+        "disabled": true
+      },
+      {
+        "name": "InternetArchive"
+      }
+    ]
+  },
+  {
+    "id": "zzikozz",
+    "name": "zzikozz / French Repo",
+    "icon": "🇫🇷",
+    "iconBg": "rgba(0,85,164,0.14)",
+    "badge": "French",
+    "tags": [
+      "french",
+      "multilang"
+    ],
+    "shortcodes": [
+      "zzikozz"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/zzikozz/frenchCS/refs/heads/main/repo.json",
+    "webpage": "https://github.com/zzikozz/frenchCS",
+    "description": "Maintained repository for French streaming providers, anime and TV sources.",
+    "plugins": [
+      {
+        "name": "1Jour1Film"
+      },
+      {
+        "name": "BuzzMonclick"
+      },
+      {
+        "name": "DuLourd"
+      },
+      {
+        "name": "FStreamzz"
+      },
+      {
+        "name": "FrenchStream"
+      },
+      {
+        "name": "Gogoflix"
+      },
+      {
+        "name": "HDSto"
+      },
+      {
+        "name": "Hdss"
+      },
+      {
+        "name": "Sadisflix"
+      },
+      {
+        "name": "Senpai-Stream"
+      },
+      {
+        "name": "SerieCenter"
+      },
+      {
+        "name": "Vostfree"
+      },
+      {
+        "name": "Wiflix"
+      },
+      {
+        "name": "WookaFR.app"
+      },
+      {
+        "name": "WookaFR"
+      }
+    ]
+  },
+  {
+    "id": "gramflix",
+    "name": "GramFlix / French Repo",
+    "icon": "🇨🇵",
+    "iconBg": "rgba(0,85,164,0.14)",
+    "badge": "French",
+    "tags": [
+      "french",
+      "multilang"
+    ],
+    "shortcodes": [
+      "gramflix"
+    ],
+    "directInstall": "https://raw.githubusercontent.com/tOntOnbOuLii/GramFlix/main/repo.json",
+    "webpage": "https://github.com/tOntOnbOuLii/GramFlix",
+    "description": "Another great French repository for streaming movies and TV series.",
+    "plugins": [
+      {
+        "name": "GramFlix Streaming"
+      }
+    ]
+  }
+];

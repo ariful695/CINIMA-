@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>EUTHOPIAR — Cinema, Series &amp; Live TV Aggregator</title>
+    <meta
+      name="description"
+      content="Unified Movie, TV Series, and Live TV streaming aggregator with TMDB metadata, M3U playlist parsing, and adaptive HLS playback."
+    />
+    <meta property="og:title" content="EUTHOPIAR — Cinema, Series &amp; Live TV Aggregator" />
+    <meta
+      property="og:description"
+      content="Unified Movie, TV Series, and Live TV streaming aggregator with TMDB metadata, M3U playlist parsing, and adaptive HLS playback."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Cinzel:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@700;800;900&family=Outfit:wght@500;600;700;800&family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      // Client-side API & Stream Endpoint Registry (No Backend Required)
+      window.__KINO_API_CONFIG__ = {
+        tmdbBaseUrl: 'https://api.themoviedb.org/3',
+        tmdbImageBase: 'https://image.tmdb.org/t/p',
+        defaultTmdbApiKey: '7ba2b8ccdcabf66f03d2c5ed45d4e2e6',
+        defaultStreamEndpoints: [],
+        iptvOrg: {
+          masterIndexUrl: 'https://iptv-org.github.io/iptv/index.m3u',
+          indexCategoryUrl: 'https://iptv-org.github.io/iptv/index.category.m3u',
+          categoryBaseUrl: 'https://iptv-org.github.io/iptv/categories',
+          countryBaseUrl: 'https://iptv-org.github.io/iptv/countries',
+          apiBaseUrl: 'https://iptv-org.github.io/api'
+        },
+        dejavuApi: {
+          baseUrl: '',
+          routes: {
+            trendingMovies: '/trending-movies',
+            trendingTvShows: '/trending-tv-shows',
+            latestMovies: '/latest-movies',
+            latestTvShows: '/latest-tv-shows',
+            comingSoon: '/comming-soon',
+            search: '/search/{query}',
+            movieDetails: '/details/movie/{id}',
+            tvDetails: '/details/tv/{id}'
+          }
+        },
+        cricbuzzApi: {
+          baseUrl: 'https://cricbuzz-cricket.p.rapidapi.com',
+          rapidApiHost: 'cricbuzz-cricket.p.rapidapi.com',
+          rapidApiKey: '4850f9c854msh9e719931e8d07c8p12b529jsnbdba1c56c2bc',
+          routes: {
+            live: '/matches/v1/live',
+            upcoming: '/matches/v1/upcoming',
+            recent: '/matches/v1/recent'
+          }
+        },
+        sportsChannels: [
+          {
+            id: 'star-sports-2-telugu',
+            name: 'Star Sports 2 Telugu HD',
+            quality: 'HD',
+            streamUrl: 'https://real-vk.proxy.nellaiiptv.com/SDMEDIA/index.m3u8',
+            logo: 'https://lo1.in/ind/starsp2.png',
+            country: 'IN'
+          },
+          {
+            id: 'sony-sports-ten-3',
+            name: 'Sony Sports Ten 3 HD (Hindi)',
+            quality: 'FHD',
+            streamUrl: 'https://r2.amml.in/sony-ten-3-hd/live.m3u8',
+            logo: 'https://lo1.in/pk/so.png',
+            country: 'IN'
+          },
+          {
+            id: 'dd-sports-in',
+            name: 'DD Sports HD',
+            quality: 'FHD',
+            streamUrl: 'https://d3qs3d2rkhfqrt.cloudfront.net/out/v1/b17adfe543354fdd8d189b110617cddd/index.m3u8',
+            logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/DD_Sports_2023_logo.svg/320px-DD_Sports_2023_logo.svg.png',
+            country: 'IN'
+          },
+          {
+            id: 'm-sports-pk',
+            name: 'M Sports HD',
+            quality: 'FHD',
+            streamUrl: 'https://cdn.rabta.stream/M-Sports/index.m3u8',
+            logo: 'https://msports.pk/wp-content/uploads/2026/02/m-sports-300.png',
+            country: 'PK'
+          }
+        ]
+      };
+    </script>
+  </head>
+  <body class="bg-[#0B0D12] text-slate-100 antialiased selection:bg-[#E50914] selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

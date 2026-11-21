@@ -1,0 +1,6 @@
+{
+  "name": "EUTHOPIAR",
+  "description": "Unified Movie, TV Series, and Live TV streaming aggregator with TMDB metadata, M3U playlist parsing, and adaptive HLS playback.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
