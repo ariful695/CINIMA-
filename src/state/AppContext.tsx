@@ -12,6 +12,7 @@ import { InstalledNuvioRepo, nuvioService } from '../services/nuvioService';
 import { storageService } from '../services/storageService';
 import { stremioAddonService } from '../services/stremioAddonService';
 import { liveTvAddonService } from '../services/liveTvAddonService';
+import { offlineDownloadService } from '../services/offlineDownloadService';
 import {
   CloudStreamRepository,
   JsonStreamEndpoint,
@@ -20,6 +21,7 @@ import {
   MediaItem,
   MediaType,
   NavTab,
+  OfflineDownloadItem,
   PlayerSession,
   ServerPickerTarget,
   StremioAddonConfig,
@@ -33,7 +35,7 @@ interface SelectedMediaTarget {
   seedItem?: MediaItem;
 }
 
-export type LibrarySubTab = 'mylist' | 'settings' | 'extensions';
+export type LibrarySubTab = 'mylist' | 'settings' | 'extensions' | 'downloads';
 
 export interface UnifiedInstallResult {
   kind: 'nuvio' | 'stremio' | 'cloudstream';
@@ -137,7 +139,7 @@ interface AppContextValue {
   isCheckingProviders: boolean;
   providerCheckError: string | null;
   providerHealthSummary: ProviderHealthSummary | null;
-  checkAllProvidersHealth: (options?: { includeDirectory?: boolean }) => Promise<ProviderHealthSummary | null>;
+  checkAllProvidersHealth: (options?: { includeDirectory?: boolean; force?: boolean }) => Promise<ProviderHealthSummary | null>;
 
   m3uPlaylists: M3UPlaylistSource[];
   saveM3UPlaylists: (playlists: M3UPlaylistSource[]) => void;
@@ -154,6 +156,7 @@ interface AppContextValue {
   mergeChannelHealth: (batch: Record<string, boolean>) => void;
   themeColor: ThemeColor;
   setThemeColor: (color: ThemeColor) => void;
+  offlineDownloads: OfflineDownloadItem[];
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -163,7 +166,6 @@ const ESSENTIAL_STREMIO_SLUGS = [
   'meteor-midnightignite',
   'torrentsdb',
   'hdhub',
-  'notorrent',
   'torrentclaw-addon',
   'peerflix',
   'pipe',
@@ -565,9 +567,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [liveLoadedOnce, setLiveLoadedOnce] = useState(false);
   const [channelHealthMap, setChannelHealthMap] = useState<Record<string, boolean>>({});
   const [themeColor, setThemeColorState] = useState<ThemeColor>(() => storageService.getThemeColor());
+  const [offlineDownloads, setOfflineDownloads] = useState<OfflineDownloadItem[]>([]);
+
+  useEffect(() => {
+    void offlineDownloadService.reconcileInterruptedDownloads().then(setOfflineDownloads);
+    return offlineDownloadService.subscribe(setOfflineDownloads);
+  }, []);
 
   const checkAllProvidersHealth = useCallback(
-    async (options?: { includeDirectory?: boolean }): Promise<ProviderHealthSummary | null> => {
+    async (options?: { includeDirectory?: boolean; force?: boolean }): Promise<ProviderHealthSummary | null> => {
       setIsCheckingProviders(true);
       setProviderCheckError(null);
 
@@ -588,7 +596,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         { key: 'core:meteor', url: 'https://meteorfortheweebs.midnightignite.me/stremio/manifest.json', name: 'Meteor P2P Add-on' },
         { key: 'core:torrentsdb', url: 'https://torrentsdb.com/manifest.json', name: 'TorrentsDB Indexer' },
         { key: 'core:hdhub', url: 'https://hdhub.thevolecitor.qzz.io/eyJ0b3Jib3giOiJ1bnNldCIsInF1YWxpdGllcyI6IjIxNjBwLDEwODBwLDcyMHAiLCJzb3J0IjoiZGVzYyJ9/manifest.json', name: 'HdHub Multi-Audio' },
-        { key: 'core:notorrent', url: 'https://nuviostreams.hayd.uk/manifest.json', name: 'Nuvio Streams Direct HTTP' },
+        { key: 'core:pipe', url: 'https://pipe.boringways.workers.dev/manifest.json', name: 'Pipe Streams Add-on' },
         { key: 'core:peerflix', url: 'https://peerflix.mov/manifest.json', name: 'Peerflix Add-on' },
         { key: 'core:cloudstream', url: 'https://raw.githubusercontent.com/phisher98/cloudstream-extensions-phisher/refs/heads/builds/repo.json', name: 'CloudStream Plugins' },
         { key: 'core:cinemeta', url: 'https://v3-cinemeta.strem.io/manifest.json', name: 'Cinemeta Catalog' },
@@ -656,7 +664,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       });
 
       try {
-        const res = await nuvioService.checkAllProvidersHealth(targets);
+        const res = await nuvioService.checkAllProvidersHealth(targets, (chunkResults) => {
+          setProviderHealthMap((prev) => ({
+            ...prev,
+            ...chunkResults,
+          }));
+        });
         setProviderHealthMap((prev) => {
           const next = { ...prev };
           for (const [k, v] of Object.entries(res.results)) {
@@ -715,22 +728,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       forceRefresh = false
     ) => {
       setLiveLoading(true);
-      const [localRes, iptvRes, addonChannels] = await Promise.all([
+      const [localRes, iptvRes, addonRes] = await Promise.all([
         m3uParserService.loadAllEnabledPlaylists(playlistsToLoad),
         iptvOrgService.fetchRegionChannels(regionCode, forceRefresh),
-        liveTvAddonService.fetchAllAddonChannels().catch(() => [] as LiveChannel[]),
+        liveTvAddonService
+          .fetchAllAddonChannels(stremioAddons)
+          .catch((err) => ({
+            channels: [] as LiveChannel[],
+            errors: { 'live-tv-addons': err instanceof Error ? err.message : 'Addon fetch error' } as Record<string, string>,
+          })),
       ]);
 
-      const mergedErrors = { ...localRes.errors };
+      const mergedErrors = { ...localRes.errors, ...addonRes.errors };
       if (iptvRes.error) {
         mergedErrors['iptv-org'] = iptvRes.error;
       }
 
-      const seenUrls = new Set<string>();
+      const seenCompositeKeys = new Set<string>();
       const combined: LiveChannel[] = [];
-      for (const ch of [...localRes.channels, ...iptvRes.channels, ...addonChannels]) {
-        if (!seenUrls.has(ch.streamUrl)) {
-          seenUrls.add(ch.streamUrl);
+      for (const ch of [...localRes.channels, ...iptvRes.channels, ...addonRes.channels]) {
+        const compositeKey = `${(ch.name || '').toLowerCase().trim()}::${(ch.streamUrl || '').trim()}`;
+        if (!seenCompositeKeys.has(compositeKey)) {
+          seenCompositeKeys.add(compositeKey);
           combined.push(ch);
         }
       }
@@ -740,7 +759,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setLiveLoadedOnce(true);
       setLiveLoading(false);
     },
-    []
+    [stremioAddons]
   );
 
   useEffect(() => {
@@ -938,6 +957,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       mergeChannelHealth,
       themeColor,
       setThemeColor,
+      offlineDownloads,
     }),
     [
       activeTab,
@@ -1010,6 +1030,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       mergeChannelHealth,
       themeColor,
       setThemeColor,
+      offlineDownloads,
     ]
   );
 

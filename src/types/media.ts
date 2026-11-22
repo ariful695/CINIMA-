@@ -29,6 +29,9 @@ export interface MediaItem {
   /** Optional local fallback artwork when no TMDB poster is loaded */
   fallbackPoster?: string;
   fallbackBackdrop?: string;
+  /** Optional Zee Bangla / Bengali serial slug & latest episode label */
+  bengaliSerialSlug?: string;
+  latestEpisodeLabel?: string;
 }
 
 export interface CastMember {
@@ -114,6 +117,9 @@ export interface StreamSource {
   isDirectPlayable?: boolean;
   isVerified?: boolean;
   extensionName?: string;
+  /** Marks YouTube/embed sources that are full episodes (not studio trailers) */
+  isFullEpisode?: boolean;
+  thumbnailUrl?: string;
 }
 
 export interface StreamResolutionResult {
@@ -266,6 +272,7 @@ export interface ProviderToggles {
   dejavu: boolean;
   cinemeta: boolean;
   opensubtitles: boolean;
+  bengali_serials: boolean;
   [key: string]: boolean;
 }
 
@@ -284,6 +291,7 @@ export interface PlayerSession {
   genreIds?: number[];
   originalLanguage?: string;
   releaseYear?: number;
+  runtimeMinutes?: number;
   seasonNumber?: number;
   episodeNumber?: number;
   episodeTitle?: string;
@@ -292,6 +300,8 @@ export interface PlayerSession {
   liveChannel?: LiveChannel;
   initialSources?: StreamSource[];
   initialSubtitles?: SubtitleTrack[];
+  bengaliSerialSlug?: string;
+  preferredVideoId?: string;
 }
 
 export interface ServerPickerTarget {
@@ -314,6 +324,8 @@ export interface ServerPickerTarget {
   episodeTitle?: string;
   initialTime?: number;
   isPublicDomain?: boolean;
+  bengaliSerialSlug?: string;
+  preferredVideoId?: string;
 }
 
 export interface StremioStream {
@@ -433,6 +445,52 @@ export interface CloudStreamRepository {
   downloadedCount: number;
   totalCount: number;
   providers: CloudStreamProviderItem[];
+}
+
+export interface OfflineSubtitleTrack {
+  id: string;
+  label: string;
+  language: string;
+}
+
+export interface OfflineDownloadItem {
+  id: string;
+  key: string;
+  mediaId: number;
+  mediaType: MediaType;
+  title: string;
+  subtitle?: string;
+  posterPath?: string | null;
+  backdropPath?: string | null;
+  fallbackPoster?: string;
+  fallbackBackdrop?: string;
+  imdbId?: string;
+  dejavuId?: string;
+  archiveIdentifier?: string;
+  originalLanguage?: string;
+  releaseYear?: number;
+  seasonNumber?: number;
+  episodeNumber?: number;
+  episodeTitle?: string;
+  providerName: string;
+  quality: string;
+  audioLanguage?: string;
+  format: 'mp4' | 'hls';
+  mimeType: string;
+  sourceUrl: string;
+  sourceId: string;
+  status: 'queued' | 'downloading' | 'paused' | 'canceled' | 'completed' | 'failed';
+  progress: number;
+  bytesDownloaded: number;
+  totalBytes: number;
+  completedUnits: number;
+  totalUnits: number;
+  encryptionAlg: string;
+  keyFingerprint: string;
+  errorMessage?: string;
+  subtitles?: OfflineSubtitleTrack[];
+  createdAt: number;
+  updatedAt: number;
 }
 
 declare global {

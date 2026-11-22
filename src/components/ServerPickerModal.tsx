@@ -105,6 +105,9 @@ export const ServerPickerModal: React.FC = () => {
   const [sources, setSources] = useState<StreamSource[]>([]);
   const [subtitles, setSubtitles] = useState<SubtitleTrack[]>([]);
   const [loading, setLoading] = useState(true);
+  const [isSearchingMore, setIsSearchingMore] = useState(false);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const [retryTick, setRetryTick] = useState(0);
 
   // Server Filtering Controls
   const [verifiedOnly, setVerifiedOnly] = useState<boolean>(false);
@@ -129,56 +132,84 @@ export const ServerPickerModal: React.FC = () => {
 
   useEffect(() => {
     resetFilters();
+    setResolveError(null);
     if (!serverPickerTarget) {
       setSources([]);
       setSubtitles([]);
       setLoading(false);
+      setIsSearchingMore(false);
       return;
     }
 
     let active = true;
+    setSources([]);
+    setSubtitles([]);
     setLoading(true);
+    setIsSearchingMore(true);
 
     const resolve = async () => {
-      const query = {
-        tmdbId: serverPickerTarget.mediaId,
-        imdbId: serverPickerTarget.imdbId,
-        dejavuId: serverPickerTarget.dejavuId,
-        archiveIdentifier: serverPickerTarget.archiveIdentifier,
-        mediaType: serverPickerTarget.mediaType,
-        title: serverPickerTarget.title,
-        genreIds: serverPickerTarget.genreIds,
-        originalLanguage: serverPickerTarget.originalLanguage,
-        releaseYear: serverPickerTarget.releaseYear,
-        seasonNumber: serverPickerTarget.seasonNumber,
-        episodeNumber: serverPickerTarget.episodeNumber,
-      };
-      const res =
-        serverPickerTarget.mediaType === 'tv'
-          ? await streamProviderService.resolveEpisodeStreams(query)
-          : await streamProviderService.resolveMovieStreams(query);
+      try {
+        const query = {
+          tmdbId: serverPickerTarget.mediaId,
+          imdbId: serverPickerTarget.imdbId,
+          dejavuId: serverPickerTarget.dejavuId,
+          archiveIdentifier: serverPickerTarget.archiveIdentifier,
+          mediaType: serverPickerTarget.mediaType,
+          title: serverPickerTarget.title,
+          genreIds: serverPickerTarget.genreIds,
+          originalLanguage: serverPickerTarget.originalLanguage,
+          releaseYear: serverPickerTarget.releaseYear,
+          seasonNumber: serverPickerTarget.seasonNumber,
+          episodeNumber: serverPickerTarget.episodeNumber,
+          episodeTitle: serverPickerTarget.episodeTitle,
+          bengaliSerialSlug: serverPickerTarget.bengaliSerialSlug,
+          preferredVideoId: serverPickerTarget.preferredVideoId,
+        };
 
-      if (!active) return;
-      const loadedSources = res.sources || [];
-      setSources(loadedSources);
-      setSubtitles(res.subtitles || []);
-      // Keep Verified Direct off by default so newly added Stremio P2P, CloudStream, and custom addons always appear immediately
-      setVerifiedOnly(false);
-      setLoading(false);
+        const handleProgress = (partial: { sources?: StreamSource[]; subtitles?: SubtitleTrack[] }) => {
+          if (!active) return;
+          const partialSources = partial.sources || [];
+          if (partialSources.length > 0) {
+            setSources(partialSources);
+            setSubtitles(partial.subtitles || []);
+            setVerifiedOnly(false);
+            setLoading(false);
+          }
+        };
+
+        const res =
+          serverPickerTarget.mediaType === 'tv'
+            ? await streamProviderService.resolveEpisodeStreams(query, { onProgress: handleProgress })
+            : await streamProviderService.resolveMovieStreams(query, { onProgress: handleProgress });
+
+        if (!active) return;
+        const loadedSources = res.sources || [];
+        setSources(loadedSources);
+        setSubtitles(res.subtitles || []);
+        setVerifiedOnly(false);
+      } catch (err) {
+        if (!active) return;
+        setResolveError(err instanceof Error ? err.message : 'Unable to probe stream servers.');
+      } finally {
+        if (active) {
+          setLoading(false);
+          setIsSearchingMore(false);
+        }
+      }
     };
 
     void resolve();
     return () => {
       active = false;
     };
-  }, [serverPickerTarget]);
+  }, [serverPickerTarget, retryTick]);
 
   const fullMovieSources = useMemo(
-    () => sources.filter((s) => s.format !== 'youtube'),
+    () => sources.filter((s) => s.format !== 'youtube' || Boolean(s.isFullEpisode)),
     [sources]
   );
   const trailerSources = useMemo(
-    () => sources.filter((s) => s.format === 'youtube'),
+    () => sources.filter((s) => s.format === 'youtube' && !s.isFullEpisode),
     [sources]
   );
 
@@ -322,6 +353,8 @@ export const ServerPickerModal: React.FC = () => {
       episodeNumber: serverPickerTarget.episodeNumber,
       episodeTitle: serverPickerTarget.episodeTitle,
       initialTime: serverPickerTarget.initialTime,
+      bengaliSerialSlug: serverPickerTarget.bengaliSerialSlug,
+      preferredVideoId: serverPickerTarget.preferredVideoId,
       preferredSourceId: source.id,
       initialSources: adjustedSources,
       initialSubtitles: subtitles,
@@ -342,7 +375,7 @@ export const ServerPickerModal: React.FC = () => {
       aria-modal="true"
       aria-labelledby="server-picker-title"
       onClick={closeServerPicker}
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-md p-0 sm:p-4 select-none"
+      className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-md p-0 sm:p-4 select-none"
     >
       <motion.div
         initial={{ opacity: 0, y: 24, scale: 0.98 }}
@@ -401,6 +434,11 @@ export const ServerPickerModal: React.FC = () => {
                 <Loader2 className="h-3 w-3 animate-spin text-slate-400" />
                 Probing live streams...
               </span>
+            ) : isSearchingMore ? (
+              <span className="text-[11px] text-emerald-300 flex items-center gap-1.5 font-mono-tabular">
+                <Loader2 className="h-3 w-3 animate-spin text-emerald-400" />
+                Searching more servers ({filteredFullSources.length} ready)...
+              </span>
             ) : fullMovieSources.length > 0 ? (
               <span className="text-[11px] text-slate-400 font-mono-tabular">
                 {filteredFullSources.length} of {fullMovieSources.length} shown
@@ -420,17 +458,29 @@ export const ServerPickerModal: React.FC = () => {
               <div className="space-y-1">
                 <p className="text-sm font-semibold text-white">No Direct Stream Found</p>
                 <p className="text-xs text-slate-300 leading-relaxed max-w-sm mx-auto">
-                  This title currently has no reachable stream mirror. You can continue browsing or try another title.
+                  {resolveError
+                    ? resolveError
+                    : 'This title currently has no reachable stream mirror. You can retry probing or try another title.'}
                 </p>
               </div>
-              <button
-                type="button"
-                onClick={closeServerPicker}
-                className="min-h-[42px] px-5 py-2 rounded-xl text-xs font-semibold text-white transition-transform active:scale-95 shadow-lg"
-                style={{ backgroundColor: accent.hex }}
-              >
-                Continue
-              </button>
+              <div className="flex items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRetryTick((t) => t + 1)}
+                  className="min-h-[42px] px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                  <span>Retry</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={closeServerPicker}
+                  className="min-h-[42px] px-5 py-2 rounded-xl text-xs font-semibold text-white transition-transform active:scale-95 shadow-lg"
+                  style={{ backgroundColor: accent.hex }}
+                >
+                  Continue
+                </button>
+              </div>
             </div>
           ) : (
             <div className="space-y-3">

@@ -96,13 +96,14 @@ export const ExtensionsScreen: React.FC = () => {
   useEffect(() => {
     if (
       !hasAutoPingedRef.current &&
+      !providerHealthSummary &&
       Object.keys(providerHealthMap).length < 30 &&
       !isCheckingProviders
     ) {
       hasAutoPingedRef.current = true;
       void checkAllProvidersHealth({ includeDirectory: true });
     }
-  }, [providerHealthMap, isCheckingProviders, checkAllProvidersHealth]);
+  }, [providerHealthMap, providerHealthSummary, isCheckingProviders, checkAllProvidersHealth]);
 
   const notify = (msg: string) => {
     setSuccessMsg(msg);
@@ -121,7 +122,7 @@ export const ExtensionsScreen: React.FC = () => {
     }
     const isDegraded =
       entry.status === 'degraded' ||
-      (entry.status === 'online' && typeof entry.latency === 'number' && entry.latency >= 600);
+      (entry.status === 'online' && typeof entry.latency === 'number' && entry.latency >= 2500);
     if (entry.status === 'online' || isDegraded) {
       return (
         <span
@@ -152,7 +153,7 @@ export const ExtensionsScreen: React.FC = () => {
   };
 
   const handleCheckAllProviders = async () => {
-    const summary = await checkAllProvidersHealth({ includeDirectory: true });
+    const summary = await checkAllProvidersHealth({ includeDirectory: true, force: true });
     if (summary) {
       notify(
         `Monitor complete: ${summary.online} online, ${summary.degraded} degraded, ${summary.offline} offline.`

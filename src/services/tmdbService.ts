@@ -90,42 +90,62 @@ function mapRawMedia(raw: TmdbRawMedia, forcedType?: MediaType): MediaItem {
 
 async function tmdbFetch<T>(endpoint: string, params: Record<string, string | number> = {}): Promise<T> {
   const apiKey = storageService.getTmdbApiKey();
-  if (!apiKey) {
-    throw new Error('TMDB_KEY_MISSING');
+  const isBearerToken = Boolean(apiKey && apiKey.length > 45 && apiKey.includes('.'));
+
+  if (apiKey) {
+    try {
+      const url = new URL(`${getBaseUrl()}${endpoint}`);
+      if (!isBearerToken) {
+        url.searchParams.set('api_key', apiKey);
+      }
+      url.searchParams.set('language', 'en-US');
+
+      for (const [key, value] of Object.entries(params)) {
+        url.searchParams.set(key, String(value));
+      }
+
+      const response = await fetch(url.toString(), {
+        headers: isBearerToken
+          ? {
+              Authorization: `Bearer ${apiKey}`,
+              Accept: 'application/json',
+            }
+          : { Accept: 'application/json' },
+      });
+
+      if (response.ok) {
+        return response.json() as Promise<T>;
+      }
+    } catch {
+      // Network/ISP block on api.themoviedb.org — fall back to server proxy below
+    }
   }
 
-  const url = new URL(`${getBaseUrl()}${endpoint}`);
-  const isBearerToken = apiKey.length > 45 && apiKey.includes('.');
-
-  if (!isBearerToken) {
-    url.searchParams.set('api_key', apiKey);
-  }
-  url.searchParams.set('language', 'en-US');
-
+  // Server-side /api/tmdb proxy fallback
+  const proxyUrl = new URL(`/api/tmdb${endpoint}`, window.location.origin);
+  proxyUrl.searchParams.set('language', 'en-US');
   for (const [key, value] of Object.entries(params)) {
-    url.searchParams.set(key, String(value));
+    proxyUrl.searchParams.set(key, String(value));
   }
-
-  const response = await fetch(url.toString(), {
-    headers: isBearerToken
-      ? {
-          Authorization: `Bearer ${apiKey}`,
-          Accept: 'application/json',
-        }
+  if (apiKey && !isBearerToken) {
+    proxyUrl.searchParams.set('api_key', apiKey);
+  }
+  const proxyRes = await fetch(proxyUrl.toString(), {
+    headers: isBearerToken && apiKey
+      ? { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' }
       : { Accept: 'application/json' },
   });
-
-  if (!response.ok) {
-    throw new Error(`TMDB_HTTP_${response.status}`);
+  if (!proxyRes.ok) {
+    throw new Error(apiKey ? `TMDB_HTTP_${proxyRes.status}` : 'TMDB_KEY_MISSING');
   }
-
-  return response.json() as Promise<T>;
+  return proxyRes.json() as Promise<T>;
 }
 
 const CACHE_TTL_MS = 15 * 60 * 1000;
 const mediaDetailsCache = new Map<string, { fetchedAt: number; data: MediaDetails }>();
 const seasonDetailsCache = new Map<string, { fetchedAt: number; data: SeasonDetails }>();
 const imdbIdCache = new Map<string, { fetchedAt: number; data: string | undefined }>();
+const mediaLogoCache = new Map<string, { fetchedAt: number; data: string | null }>();
 
 export const tmdbService = {
   hasApiKey(): boolean {
@@ -590,7 +610,7 @@ export const tmdbService = {
     if (!id || (id >= 880001 && id <= 899999)) return undefined;
     const cacheKey = `${mediaType}:${id}`;
     const cached = imdbIdCache.get(cacheKey);
-    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS && cached.data) {
       return cached.data;
     }
     try {
@@ -599,10 +619,58 @@ export const tmdbService = {
         external_ids?: { imdb_id?: string };
       }>(`/${mediaType}/${id}/external_ids`);
       const imdbId = data.imdb_id || data.external_ids?.imdb_id;
-      imdbIdCache.set(cacheKey, { fetchedAt: Date.now(), data: imdbId });
-      return imdbId;
+      if (imdbId) {
+        imdbIdCache.set(cacheKey, { fetchedAt: Date.now(), data: imdbId });
+        return imdbId;
+      }
     } catch {
-      return undefined;
+      // Fall through to /api/resolve-imdb
+    }
+    try {
+      const res = await fetch(
+        `/api/resolve-imdb?tmdbId=${encodeURIComponent(String(id))}&mediaType=${mediaType}`
+      );
+      if (res.ok) {
+        const json = (await res.json()) as { imdbId?: string | null };
+        if (json?.imdbId) {
+          imdbIdCache.set(cacheKey, { fetchedAt: Date.now(), data: json.imdbId });
+          return json.imdbId;
+        }
+      }
+    } catch {
+      // Ignore network errors
+    }
+    return undefined;
+  },
+
+  async getMediaLogo(id: number, mediaType: MediaType): Promise<string | null> {
+    if (!id || (id >= 880001 && id <= 899999)) return null;
+    const cacheKey = `${mediaType}:${id}`;
+    const cached = mediaLogoCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
+      return cached.data;
+    }
+    try {
+      const data = await tmdbFetch<{
+        logos?: Array<{
+          file_path?: string;
+          iso_639_1?: string | null;
+          vote_average?: number;
+        }>;
+      }>(`/${mediaType}/${id}/images`, {
+        include_image_language: 'en,null',
+      });
+      const logos = (data.logos || []).filter((l) => Boolean(l.file_path));
+      const picked =
+        logos.find((l) => l.iso_639_1 === 'en') ||
+        logos.find((l) => !l.iso_639_1) ||
+        logos[0];
+      const logoUrl = picked?.file_path ? getTmdbImageUrl(picked.file_path, 'w500') : null;
+      mediaLogoCache.set(cacheKey, { fetchedAt: Date.now(), data: logoUrl });
+      return logoUrl;
+    } catch {
+      mediaLogoCache.set(cacheKey, { fetchedAt: Date.now(), data: null });
+      return null;
     }
   },
 };

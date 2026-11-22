@@ -89,6 +89,8 @@ export const LiveTvScreen: React.FC = () => {
   const [probing, setProbing] = useState(false);
   const [verifiedOnly, setVerifiedOnly] = useState(false);
 
+  const [showAllErrors, setShowAllErrors] = useState(false);
+
   const healthMapRef = useRef(channelHealthMap);
   healthMapRef.current = channelHealthMap;
 
@@ -105,7 +107,9 @@ export const LiveTvScreen: React.FC = () => {
 
   const protocolFiltered = useMemo(() => {
     if (!httpsOnly) return liveChannels;
-    return liveChannels.filter((ch) => ch.streamUrl.startsWith('https://'));
+    return liveChannels.filter(
+      (ch) => ch.streamUrl.startsWith('https://') || ch.streamUrl.startsWith('/api/')
+    );
   }, [liveChannels, httpsOnly]);
 
   // Dynamically extract M3U group-title categories sorted by channel count
@@ -410,11 +414,33 @@ export const LiveTvScreen: React.FC = () => {
       </div>
 
       {errorEntries.length > 0 && (
-        <div className="rounded-2xl bg-amber-500/10 border border-amber-400/30 p-3.5 flex items-center gap-3">
-          <AlertCircle className="h-4 w-4 text-amber-400 shrink-0" />
-          <p className="text-xs text-amber-200 truncate">
-            {errorEntries[0]?.[1] || 'Could not load playlist.'}
-          </p>
+        <div className="rounded-2xl bg-amber-500/10 border border-amber-400/30 p-3.5 space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <AlertCircle className="h-4 w-4 text-amber-400 shrink-0" />
+              <p className="text-xs text-amber-200 truncate font-medium">
+                {errorEntries[0]?.[1] || 'Could not load playlist.'}
+              </p>
+            </div>
+            {errorEntries.length > 1 && (
+              <button
+                type="button"
+                onClick={() => setShowAllErrors((v) => !v)}
+                className="text-[11px] font-semibold text-amber-300 hover:text-amber-100 bg-amber-500/20 px-2.5 py-1 rounded-lg shrink-0 transition-colors"
+              >
+                {showAllErrors ? 'Hide details' : `+${errorEntries.length - 1} more errors`}
+              </button>
+            )}
+          </div>
+          {showAllErrors && errorEntries.length > 1 && (
+            <div className="pt-2 border-t border-amber-400/20 space-y-1">
+              {errorEntries.slice(1).map(([source, err]) => (
+                <p key={source} className="text-[11px] text-amber-300/90 pl-6 truncate">
+                  <span className="font-semibold text-amber-200">{source}:</span> {err}
+                </p>
+              ))}
+            </div>
+          )}
         </div>
       )}
 

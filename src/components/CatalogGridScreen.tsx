@@ -3,6 +3,7 @@ import { Check, ChevronDown, Languages, RotateCcw, Subtitles, Volume2, X } from 
 import { motion } from 'motion/react';
 import { CURATED_MOVIES, CURATED_SERIES, TMDB_GENRES } from '../data/curatedCatalog';
 import { archiveMovieService } from '../services/archiveMovieService';
+import { bengaliSerialService } from '../services/bengaliSerialService';
 import { dejavuApiService } from '../services/dejavuApiService';
 import { tmdbService } from '../services/tmdbService';
 import { useAppState } from '../state/AppContext';
@@ -209,7 +210,7 @@ export const CatalogGridScreen: React.FC<CatalogGridScreenProps> = ({ mediaType 
       const needsAudioFetch = languageMode === 'all' || languageMode === 'audio';
       const isArchiveRegional = selectedLanguage === 'bn' || selectedLanguage === 'hi';
 
-      const [tmdbOrig, tmdbSpoken, archiveLang, bnSubArchive, hiSubArchive] = await Promise.all([
+      const [tmdbOrig, tmdbSpoken, archiveLang, bnSubArchive, hiSubArchive, bengaliCatalog] = await Promise.all([
         needsAudioFetch
           ? mediaType === 'movie'
             ? tmdbService.getMoviesByLanguage(selectedLanguage, 'original')
@@ -232,6 +233,9 @@ export const CatalogGridScreen: React.FC<CatalogGridScreenProps> = ({ mediaType 
         mediaType === 'movie' && languageMode === 'subtitle' && selectedLanguage === 'en'
           ? archiveMovieService.fetchLiveArchiveByLanguage('hindi', 6)
           : Promise.resolve([]),
+        mediaType === 'tv' && selectedLanguage === 'bn' && needsAudioFetch
+          ? bengaliSerialService.getCatalog()
+          : Promise.resolve({ zeeBanglaDaily: [], bengaliCartoons: [], updatedAt: 0 }),
       ]);
 
       if (!active) return;
@@ -245,8 +249,9 @@ export const CatalogGridScreen: React.FC<CatalogGridScreenProps> = ({ mediaType 
         }
       }
 
-      // Then merge regional Archive & TMDB discoveries for the chosen language
-      for (const item of [...archiveLang, ...bnSubArchive, ...hiSubArchive, ...tmdbOrig, ...tmdbSpoken]) {
+      // Then merge regional Archive, Zee Bangla Daily Serials, and TMDB discoveries for the chosen language
+      const bengaliItems = [...bengaliCatalog.zeeBanglaDaily, ...bengaliCatalog.bengaliCartoons];
+      for (const item of [...bengaliItems, ...archiveLang, ...bnSubArchive, ...hiSubArchive, ...tmdbOrig, ...tmdbSpoken]) {
         if (item.mediaType !== mediaType) continue;
         // Tag spoken-language TMDB matches when filtering by subtitles
         const enriched: MediaItem =

@@ -249,6 +249,7 @@ interface TmdbTitleMeta {
 }
 
 const tmdbMetaCache = new Map<string, { fetchedAt: number; data: TmdbTitleMeta | null }>();
+const imdbResolveCache = new Map<string, { fetchedAt: number; imdbId?: string }>();
 const streamsResultCache = new Map<string, { fetchedAt: number; payload: unknown }>();
 
 async function fetchTmdbTitleMeta(
@@ -350,6 +351,97 @@ async function fetchTmdbTitleMeta(
   } catch {
     return null;
   }
+}
+
+async function resolveImdbIdServerSide(
+  tmdbId: string,
+  mediaType: 'movie' | 'tv',
+  apiKey?: string,
+  fallbackTitle?: string,
+  fallbackYear?: number
+): Promise<string | undefined> {
+  const cleanId = String(tmdbId || '').trim();
+  if (!cleanId) return undefined;
+  const cacheKey = `${mediaType}:${cleanId}`;
+  const cached = imdbResolveCache.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < 60 * 60 * 1000 && cached.imdbId) {
+    return cached.imdbId;
+  }
+
+  const effectiveKey = (apiKey || DEFAULT_TMDB_KEY).trim();
+  if (effectiveKey) {
+    try {
+      const isBearer = effectiveKey.length > 45 && effectiveKey.includes('.');
+      const headers: Record<string, string> = isBearer
+        ? { Authorization: `Bearer ${effectiveKey}`, Accept: 'application/json' }
+        : { Accept: 'application/json' };
+      const url = new URL(`https://api.themoviedb.org/3/${mediaType}/${encodeURIComponent(cleanId)}/external_ids`);
+      if (!isBearer) url.searchParams.set('api_key', effectiveKey);
+
+      const res = await fetch(url.toString(), {
+        headers,
+        signal: AbortSignal.timeout(4500),
+      });
+      if (res.ok) {
+        const json = (await res.json()) as { imdb_id?: string };
+        if (json?.imdb_id && /^tt\d+$/i.test(json.imdb_id)) {
+          imdbResolveCache.set(cacheKey, { fetchedAt: Date.now(), imdbId: json.imdb_id });
+          return json.imdb_id;
+        }
+      }
+    } catch {
+      // Continue to Cinemeta fallback
+    }
+  }
+
+  // Fallback via Stremio Cinemeta catalog search if title is known
+  let searchTitle = (fallbackTitle || '').trim();
+  let searchYear = fallbackYear;
+  if (!searchTitle) {
+    const meta = await fetchTmdbTitleMeta(cleanId, mediaType, apiKey);
+    if (meta?.title) {
+      searchTitle = meta.title;
+      if (!searchYear && meta.year) searchYear = meta.year;
+    }
+  }
+  if (searchTitle) {
+    try {
+      const cinemetaType = mediaType === 'tv' ? 'series' : 'movie';
+      const cUrl = `https://v3-cinemeta.strem.io/catalog/${cinemetaType}/top/search=${encodeURIComponent(searchTitle)}.json`;
+      const cRes = await fetch(cUrl, {
+        headers: { 'User-Agent': DEFAULT_UA, Accept: 'application/json' },
+        signal: AbortSignal.timeout(4500),
+      });
+      if (cRes.ok) {
+        const cJson = (await cRes.json()) as {
+          metas?: Array<{ id?: string; imdb_id?: string; name?: string; releaseInfo?: string }>;
+        };
+        const targetNorm = searchTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const match = (cJson.metas || []).find((m) => {
+          const mId = m.imdb_id || m.id || '';
+          if (!/^tt\d+$/i.test(mId)) return false;
+          const mNorm = (m.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+          if (!mNorm) return false;
+          const nameMatches = mNorm === targetNorm || mNorm.includes(targetNorm) || targetNorm.includes(mNorm);
+          if (!nameMatches) return false;
+          if (searchYear && m.releaseInfo) {
+            const yr = parseInt(String(m.releaseInfo).slice(0, 4), 10);
+            if (Number.isFinite(yr) && Math.abs(yr - searchYear) > 1) return false;
+          }
+          return true;
+        });
+        const resolved = match?.imdb_id || match?.id;
+        if (resolved && /^tt\d+$/i.test(resolved)) {
+          imdbResolveCache.set(cacheKey, { fetchedAt: Date.now(), imdbId: resolved });
+          return resolved;
+        }
+      }
+    } catch {
+      // Cinemeta fallback failed
+    }
+  }
+
+  return undefined;
 }
 
 function tokenizeTitle(str: string): string[] {
@@ -724,13 +816,13 @@ async function fetchNuvioManifest(manifestUrl: string, forceRefresh = false): Pr
   return normalized;
 }
 
-async function fetchScraperCode(scriptUrl: string, timeoutMs = 8500): Promise<string> {
+async function fetchScraperCode(scriptUrl: string, timeoutMs = 8500, maxAttempts = 2): Promise<string> {
   const cached = scriptCache.get(scriptUrl);
   if (cached && Date.now() - cached.fetchedAt < 15 * 60 * 1000) {
     return cached.code;
   }
   let lastErr: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     try {
       const res = await fetch(scriptUrl, {
         headers: { 'User-Agent': DEFAULT_UA },
@@ -1156,16 +1248,26 @@ function destroyTorrentEntry(hash: string) {
   const entry = activeTorrents.get(hash);
   if (!entry) return;
   activeTorrents.delete(hash);
+  entry.preparedFiles.clear();
+
+  const cleanupDir = () => {
+    try {
+      fs.rmSync(entry.dirPath, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup failure
+    }
+  };
+
   try {
+    (entry.engine as unknown as { removeAllListeners?: () => void }).removeAllListeners?.();
+    const fallbackCleanup = setTimeout(cleanupDir, 1500);
+    fallbackCleanup.unref?.();
     entry.engine.destroy(() => {
-      try {
-        fs.rmSync(entry.dirPath, { recursive: true, force: true });
-      } catch {
-        // Ignore cleanup failure
-      }
+      clearTimeout(fallbackCleanup);
+      cleanupDir();
     });
   } catch {
-    // Ignore destroy errors
+    cleanupDir();
   }
 }
 
@@ -1190,8 +1292,8 @@ async function getReadyTorrentEntry(infoHash: string, extraTrackers: string[]): 
     }
   }
 
-  // Keep max 2 active torrents so /tmp disk usage stays small
-  while (activeTorrents.size >= 2) {
+  // Keep max 5 active torrents so /tmp disk usage stays controlled while preventing premature eviction
+  while (activeTorrents.size >= 5) {
     const oldest = Array.from(activeTorrents.values()).sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
     if (oldest) destroyTorrentEntry(oldest.infoHash);
     else break;
@@ -1231,7 +1333,7 @@ async function getReadyTorrentEntry(infoHash: string, extraTrackers: string[]): 
         destroyTorrentEntry(hash);
         reject(new Error('Torrent metadata timeout — no reachable peers/seeds yet'));
       }
-    }, 22000);
+    }, 35000);
     entry.engine.on('ready', () => {
       clearTimeout(timer);
       entry.ready = true;
@@ -1353,12 +1455,9 @@ function prepareTorrentFile(
         engine.critical?.(tailStartPiece, Math.min(2, tailPieces));
         engine.select(tailStartPiece, fileEndPiece, 8);
       }
-      // 2. Sequential pre-buffer window
+      // 2. Sequential pre-buffer window (focus 100% of bandwidth on initial playback pieces)
       engine.select(fileStartPiece, preEndPiece, 5);
-      // 3. Background remainder of the video file
-      if (preEndPiece < fileEndPiece) {
-        engine.select(preEndPiece + 1, fileEndPiece, 1);
-      }
+      // Background remainder is deferred until stream connection starts to maximize prebuffer speed
     } else {
       file.select();
     }
@@ -1411,7 +1510,13 @@ function getTorrentPrebufferStatus(entry: ActiveTorrentEntry, state: PreparedTor
 
   const wires = entry.engine.swarm?.wires || [];
   const peers = wires.length;
-  const seeders = wires.filter((w) => w && w.peerChoking === false).length;
+  const seeders = wires.filter(
+    (w: any) =>
+      w &&
+      (w.isSeeder ||
+        w.peerChoking === false ||
+        (w.peerPieces && typeof w.peerPieces.count === 'function' && w.peerPieces.count() > 0))
+  ).length;
   let speedBps = 0;
   try {
     speedBps = entry.engine.swarm?.downloadSpeed?.() || 0;
@@ -1420,14 +1525,17 @@ function getTorrentPrebufferStatus(entry: ActiveTorrentEntry, state: PreparedTor
   }
   const speedKbps = Math.round((speedBps / 1024) * 10) / 10;
 
+  // Lower playback threshold to 2.5 MB + header ready so playback starts fast
+  const minRequiredBytes = Math.min(state.targetBytes, 2.5 * 1024 * 1024);
   const readyToPlay =
     headReady &&
-    (completedPrePieces >= totalPrePieces || prebufferedBytes >= state.targetBytes);
+    (prebufferedBytes >= minRequiredBytes || completedPrePieces >= totalPrePieces);
 
   return {
     infoHash: entry.infoHash,
     fileIdx: state.fileIdx,
     fileName: state.fileName,
+    fileLength: state.fileLength,
     fileSize: state.fileLength,
     peers,
     seeders,
@@ -1726,11 +1834,12 @@ async function pipeStreamThroughFfmpegRemux(
         return resolve('aborted');
       }
 
+      const useStdinPipe = mode === 'pipe-fetch' || typeof inputSource !== 'string';
       const args: string[] = ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts'];
-      if (mode === 'url' && typeof inputSource === 'string') {
-        if (seekSeconds && seekSeconds > 0) {
-          args.push('-ss', String(seekSeconds));
-        }
+      if (!useStdinPipe && seekSeconds && seekSeconds > 0) {
+        args.push('-ss', String(seekSeconds));
+      }
+      if (!useStdinPipe && typeof inputSource === 'string') {
         const isLocalUrl =
           inputSource.startsWith('http://127.0.0.1') || inputSource.startsWith('http://localhost');
         if (!isLocalUrl) {
@@ -1744,6 +1853,9 @@ async function pipeStreamThroughFfmpegRemux(
         args.push('-i', inputSource);
       } else {
         args.push('-i', 'pipe:0');
+        if (seekSeconds && seekSeconds > 0) {
+          args.push('-ss', String(seekSeconds));
+        }
       }
 
       if (probed) {
@@ -1782,7 +1894,6 @@ async function pipeStreamThroughFfmpegRemux(
         'pipe:1'
       );
 
-      const useStdinPipe = mode === 'pipe-fetch' || typeof inputSource !== 'string';
       const ff = spawn('ffmpeg', args, { stdio: [useStdinPipe ? 'pipe' : 'ignore', 'pipe', 'pipe'] });
 
       let sentAnyBytes = false;
@@ -1821,6 +1932,13 @@ async function pipeStreamThroughFfmpegRemux(
             res.setHeader('Content-Type', 'video/mp4');
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Cache-Control', 'no-cache');
+            if (probed?.durationSeconds && Number.isFinite(probed.durationSeconds)) {
+              res.setHeader('X-Content-Duration', String(Math.round(probed.durationSeconds)));
+              res.setHeader(
+                'Access-Control-Expose-Headers',
+                'X-Content-Duration, Accept-Ranges, Content-Length, Content-Range, Content-Type'
+              );
+            }
           }
         }
         if (!res.write(chunk)) {
@@ -1919,6 +2037,62 @@ async function startServer() {
     res.json({ ok: true, uptime: Math.round(process.uptime()) });
   });
 
+  // Server-side IMDb resolver (protects Stremio/Torrentio/Meteor resolution when browser cannot reach TMDB directly)
+  app.get('/api/resolve-imdb', async (req, res) => {
+    const tmdbId = String(req.query.tmdbId || '').trim();
+    const mediaType = req.query.mediaType === 'tv' ? 'tv' : 'movie';
+    const title = typeof req.query.title === 'string' ? req.query.title : undefined;
+    const year = req.query.year ? Number(req.query.year) : undefined;
+    const headerKey = typeof req.headers['x-tmdb-key'] === 'string' ? req.headers['x-tmdb-key'] : undefined;
+    if (!tmdbId) {
+      return res.status(400).json({ error: 'Missing tmdbId', imdbId: null });
+    }
+    const imdbId = await resolveImdbIdServerSide(tmdbId, mediaType, headerKey, title, year);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.json({ imdbId: imdbId || null });
+  });
+
+  // Server-side TMDB v3 proxy fallback when client network blocks api.themoviedb.org
+  app.get('/api/tmdb/*', async (req, res) => {
+    const subPath = String((req.params as Record<string, unknown>)[0] || '').replace(/^\/+/, '');
+    if (!subPath || subPath.includes('..')) {
+      return res.status(400).json({ error: 'Invalid TMDB path' });
+    }
+    try {
+      const targetUrl = new URL(`https://api.themoviedb.org/3/${subPath}`);
+      for (const [k, v] of Object.entries(req.query)) {
+        if (typeof v === 'string') targetUrl.searchParams.set(k, v);
+      }
+      const clientAuth = typeof req.headers.authorization === 'string' ? req.headers.authorization : '';
+      const hasQueryKey = targetUrl.searchParams.has('api_key');
+      const headers: Record<string, string> = {
+        'User-Agent': DEFAULT_UA,
+        Accept: 'application/json',
+      };
+      if (clientAuth) {
+        headers['Authorization'] = clientAuth;
+      } else if (!hasQueryKey) {
+        const effectiveKey = DEFAULT_TMDB_KEY;
+        if (effectiveKey.length > 45 && effectiveKey.includes('.')) {
+          headers['Authorization'] = `Bearer ${effectiveKey}`;
+        } else {
+          targetUrl.searchParams.set('api_key', effectiveKey);
+        }
+      }
+      const upstream = await fetch(targetUrl.toString(), {
+        headers,
+        signal: AbortSignal.timeout(9000),
+      });
+      const text = await upstream.text();
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Content-Type', upstream.headers.get('content-type') || 'application/json; charset=utf-8');
+      res.status(upstream.status).send(text);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'TMDB proxy error';
+      res.status(502).json({ error: msg });
+    }
+  });
+
   // Generic CORS proxy for HTML/JSON endpoints
   app.get('/api/proxy', async (req, res) => {
     const targetUrl = req.query.url as string;
@@ -1926,11 +2100,21 @@ async function startServer() {
       return res.status(400).json({ error: 'Missing target url parameter' });
     }
     try {
+      const proxyHeaders: Record<string, string> = {
+        'User-Agent': DEFAULT_UA,
+        Accept: 'application/json, text/html, text/plain, */*',
+      };
+      if (req.query.referer) {
+        proxyHeaders['Referer'] = String(req.query.referer);
+      } else if (targetUrl.includes('anikoto')) {
+        proxyHeaders['Referer'] = 'https://anikototv.bz/';
+      }
+      if (req.query.origin) {
+        proxyHeaders['Origin'] = String(req.query.origin);
+      }
+
       const response = await fetch(targetUrl, {
-        headers: {
-          'User-Agent': DEFAULT_UA,
-          Referer: 'https://anikototv.bz/',
-        },
+        headers: proxyHeaders,
         signal: AbortSignal.timeout(15000),
       });
       const contentType = response.headers.get('content-type') || 'text/html';
@@ -1964,6 +2148,25 @@ async function startServer() {
     };
 
     if (shouldRemux) {
+      if (req.method === 'HEAD') {
+        let probed = containerProbeCache.get(targetUrl) || null;
+        if (!probed) {
+          probed = await probeContainerInfoAsync(targetUrl, forwardHeaders, 4000);
+          if (!probed) {
+            probed = await probeContainerViaNodeFetch(targetUrl, forwardHeaders);
+          }
+        }
+        res.setHeader('Content-Type', 'video/mp4');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader(
+          'Access-Control-Expose-Headers',
+          'X-Content-Duration, Accept-Ranges, Content-Length, Content-Range, Content-Type'
+        );
+        if (probed?.durationSeconds && Number.isFinite(probed.durationSeconds)) {
+          res.setHeader('X-Content-Duration', String(Math.round(probed.durationSeconds)));
+        }
+        return res.status(200).end();
+      }
       await pipeStreamThroughFfmpegRemux(targetUrl, res, isHevc, forwardHeaders, preferredLang, seekSec);
       return;
     }
@@ -2003,7 +2206,7 @@ async function startServer() {
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader(
         'Access-Control-Expose-Headers',
-        'Content-Length, Content-Range, Accept-Ranges, Content-Type'
+        'X-Content-Duration, Content-Length, Content-Range, Accept-Ranges, Content-Type'
       );
 
       if (isM3u8) {
@@ -2237,6 +2440,23 @@ async function startServer() {
 
       const needsRemux = !rawParam && (remuxParam || /\.(mkv|avi)$/i.test(targetFile.name));
       if (needsRemux) {
+        const localRawUrl = `http://127.0.0.1:${PORT}/api/torrent/stream?infoHash=${encodeURIComponent(infoHash)}&fileIdx=${found.fileIdx}&raw=1&p2p=${isP2P ? '1' : '0'}&prebufferMb=${state.prebufferMb}`;
+        if (req.method === 'HEAD') {
+          let probed = containerProbeCache.get(localRawUrl) || null;
+          if (!probed && entry.engine.bitfield?.get(state.fileStartPiece)) {
+            probed = await probeContainerInfoAsync(localRawUrl, undefined, 3500);
+          }
+          res.setHeader('Content-Type', 'video/mp4');
+          res.setHeader('Access-Control-Allow-Origin', '*');
+          res.setHeader(
+            'Access-Control-Expose-Headers',
+            'X-Content-Duration, Accept-Ranges, Content-Length, Content-Range, Content-Type'
+          );
+          if (probed?.durationSeconds && Number.isFinite(probed.durationSeconds)) {
+            res.setHeader('X-Content-Duration', String(Math.round(probed.durationSeconds)));
+          }
+          return res.status(200).end();
+        }
         // Wait briefly for header + tail if not yet ready so ffprobe & ffmpeg Cues seek succeed cleanly
         if (!entry.engine.bitfield?.get(state.fileStartPiece)) {
           await new Promise<void>((resolve) => {
@@ -2254,14 +2474,23 @@ async function startServer() {
             entry.engine.on('verify', onVerify);
           });
         }
-        const localRawUrl = `http://127.0.0.1:${PORT}/api/torrent/stream?infoHash=${encodeURIComponent(infoHash)}&fileIdx=${found.fileIdx}&raw=1&p2p=${isP2P ? '1' : '0'}&prebufferMb=${state.prebufferMb}`;
         return pipeStreamThroughFfmpegRemux(localRawUrl, res, isHevc, undefined, langParam, seekSec);
+      }
+
+      // Trigger background pieces download now that stream playback has begun
+      if (isP2P && state.preEndPiece < state.fileEndPiece) {
+        try {
+          entry.engine.select?.(state.preEndPiece + 1, state.fileEndPiece, 1);
+        } catch {}
       }
 
       const fileSize = targetFile.length;
       const rangeHeader = req.headers.range;
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Accept-Ranges, Content-Type');
+      res.setHeader(
+        'Access-Control-Expose-Headers',
+        'Content-Length, Content-Range, Accept-Ranges, Content-Type, X-Content-Duration'
+      );
       res.setHeader('Accept-Ranges', 'bytes');
       res.setHeader('Cache-Control', 'no-store');
       res.setHeader('Content-Disposition', 'inline');
@@ -2403,15 +2632,35 @@ async function startServer() {
       }
     }
 
+    const fallbackTitle = typeof req.query.title === 'string' ? req.query.title.trim() : '';
+    const fallbackYear = req.query.year ? Number(req.query.year) : null;
+    const routeStartTime = Date.now();
     try {
       const repoTag = Buffer.from(manifestUrl)
         .toString('base64url')
         .replace(/[^a-zA-Z0-9]/g, '')
         .slice(-6) || 'def';
-      const [manifest, tmdbMeta] = await Promise.all([
+      const shouldFetchCb = !requestedIds && manifestUrl === DEFAULT_NUVIO_MANIFEST;
+      const [manifest, fetchedTmdbMeta, cbManifest] = await Promise.all([
         fetchNuvioManifest(manifestUrl),
         fetchTmdbTitleMeta(tmdbId, mediaType, undefined, season, episode),
+        shouldFetchCb ? fetchNuvioManifest(CB_PROVIDERS_MANIFEST).catch(() => null) : Promise.resolve(null),
       ]);
+      const tmdbMeta: TmdbTitleMeta | null =
+        fetchedTmdbMeta ||
+        (fallbackTitle
+          ? {
+              title: fallbackTitle,
+              originalTitle: fallbackTitle,
+              year: Number.isFinite(fallbackYear) ? fallbackYear : null,
+              lastAirYear: null,
+              episodeAirYear: null,
+              runtimeMinutes: null,
+              episodeRuntimeMinutes: null,
+              genreIds: [],
+              originalLanguage: '',
+            }
+          : null);
       const baseUrl = manifestUrl.replace(/\/manifest\.json.*$/, '');
 
       const isAnimationOrAnime = Boolean(
@@ -2443,23 +2692,17 @@ async function startServer() {
         })
         .map((s) => ({ ...s, _baseUrl: baseUrl }));
 
-      // Also pull verified Hindi/Multi-audio scrapers from SA7ANI/cb-providers when running default repo
       let extraCbScrapers: NuvioScraperMeta[] = [];
-      if (!requestedIds && manifestUrl === DEFAULT_NUVIO_MANIFEST) {
-        try {
-          const cbManifest = await fetchNuvioManifest(CB_PROVIDERS_MANIFEST);
-          const cbBase = CB_PROVIDERS_MANIFEST.replace(/\/manifest\.json.*$/, '');
-          extraCbScrapers = cbManifest.scrapers
-            .filter((s) => CB_HINDI_SCRAPER_IDS.has(s.id))
-            .map((s) => ({
-              ...s,
-              id: `cb-${s.id}`,
-              name: s.name,
-              _baseUrl: cbBase,
-            }));
-        } catch {
-          // Optional extra repo unreachable; proceed with primary scrapers
-        }
+      if (cbManifest) {
+        const cbBase = CB_PROVIDERS_MANIFEST.replace(/\/manifest\.json.*$/, '');
+        extraCbScrapers = cbManifest.scrapers
+          .filter((s) => CB_HINDI_SCRAPER_IDS.has(s.id))
+          .map((s) => ({
+            ...s,
+            id: `cb-${s.id}`,
+            name: s.name,
+            _baseUrl: cbBase,
+          }));
       }
 
       const scrapersToRun = [...primaryScrapers, ...extraCbScrapers];
@@ -2513,7 +2756,7 @@ async function startServer() {
         scrapersToRun.map(async (scraper) => {
           try {
             const scriptUrl = `${scraper._baseUrl || baseUrl}/${scraper.filename}`;
-            const code = await fetchScraperCode(scriptUrl, 6000);
+            const code = await fetchScraperCode(scriptUrl, 3800, 1);
             const scraperLogs: string[] = [];
             const exportsObj = compileScraperModule(code, (msg) => {
               if (scraperLogs.length < 40) scraperLogs.push(msg);
@@ -2535,7 +2778,7 @@ async function startServer() {
             const rawStreams = await Promise.race([
               getStreams(tmdbId, mediaType, season, episode),
               new Promise<NuvioRawStream[]>((_, reject) =>
-                setTimeout(() => reject(new Error('timeout')), 6000)
+                setTimeout(() => reject(new Error('timeout')), 5500)
               ),
             ]);
 
@@ -2714,13 +2957,13 @@ async function startServer() {
       }
       const roundRobinPool: CandidateSource[] = [];
       let roundIdx = 0;
-      while (roundRobinPool.length < Math.min(candidates.length, 64)) {
+      while (roundRobinPool.length < Math.min(candidates.length, 48)) {
         let addedAny = false;
         for (const list of byScraper.values()) {
           if (roundIdx < list.length) {
             roundRobinPool.push(list[roundIdx]);
             addedAny = true;
-            if (roundRobinPool.length >= 64) break;
+            if (roundRobinPool.length >= 48) break;
           }
         }
         if (!addedAny) break;
@@ -2983,9 +3226,9 @@ async function startServer() {
                 }
               }
             }
-          } else {
-            // Probe actual MKV/MP4 audio tracks and duration with ffprobe
-            const probedInfo = await probeContainerInfoAsync(cand._rawUrl, cand._rawHeaders, 3800);
+          } else if (Date.now() - routeStartTime < 9000) {
+            // Probe actual MKV/MP4 audio tracks and duration with ffprobe when within soft time budget
+            const probedInfo = await probeContainerInfoAsync(cand._rawUrl, cand._rawHeaders, 2500);
             if (probedInfo) {
               if (probedInfo.durationSeconds && isDurationMismatched(probedInfo.durationSeconds)) {
                 rejectedUrls.add(cand.id);
@@ -3016,15 +3259,21 @@ async function startServer() {
         }
       };
 
-      const PROBE_BATCH = 32;
+      const PROBE_BATCH = 48;
       for (let i = 0; i < roundRobinPool.length; i += PROBE_BATCH) {
+        if (Date.now() - routeStartTime > 11500) break;
         await Promise.allSettled(roundRobinPool.slice(i, i + PROBE_BATCH).map(probeCandidate));
       }
 
+      // If strict probing timed out or rate-limited every mirror, surface unrejected round-robin candidates as unverified fallback
+      const useFallbackUnverified = probedOk.size === 0 && roundRobinPool.length > 0;
+      const poolToExpand = useFallbackUnverified
+        ? roundRobinPool.filter((c) => !rejectedUrls.has(c.id)).slice(0, 12)
+        : candidates.filter((c) => probedOk.has(c.id) && !rejectedUrls.has(c.id));
+
       // Split any multi-language stream into SEPARATE individual server entries (never "Hindi + English" combined!)
       const expandedCandidates: CandidateSource[] = [];
-      for (const cand of candidates) {
-        if (!probedOk.has(cand.id) || rejectedUrls.has(cand.id)) continue;
+      for (const cand of poolToExpand) {
         if (Array.isArray(cand._subtitles) && cand._subtitles.length > 0) {
           allSubtitles.push(...cand._subtitles);
         }
@@ -3082,7 +3331,7 @@ async function startServer() {
             ...publicSource
           }) => ({
             ...publicSource,
-            isVerified: true,
+            isVerified: !useFallbackUnverified,
           })
         );
 
@@ -3210,7 +3459,7 @@ async function startServer() {
               Referer: 'https://web.stremio.com/',
             },
             redirect: 'follow',
-            signal: AbortSignal.timeout(5500),
+            signal: AbortSignal.timeout(4500),
           });
           const latency = Date.now() - start;
 
@@ -3272,8 +3521,8 @@ async function startServer() {
             }
           }
 
-          // Mark slow >= 600ms responses as Yellow (degraded) for accurate SLA monitoring
-          if (latency >= 600) {
+          // Mark slow >= 2500ms responses as degraded (realistic cross-region CDN SLA)
+          if (latency >= 2500) {
             return {
               status: 'degraded',
               latency,
@@ -3319,8 +3568,8 @@ async function startServer() {
       results[target.key] = await probeEndpointUrl(normalizedUrl);
     };
 
-    // Process in concurrent batches of 20 with URL deduplication
-    const CONCURRENCY = 20;
+    // Process in concurrent batches of 25 with URL deduplication
+    const CONCURRENCY = 25;
     for (let i = 0; i < targets.length; i += CONCURRENCY) {
       await Promise.allSettled(targets.slice(i, i + CONCURRENCY).map(checkSingleTarget));
     }

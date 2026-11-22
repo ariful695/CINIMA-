@@ -104,7 +104,7 @@ export const SettingsScreen: React.FC = () => {
       statusInfo.status === 'degraded' ||
       (statusInfo.status === 'online' &&
         typeof statusInfo.latency === 'number' &&
-        statusInfo.latency >= 600);
+        statusInfo.latency >= 2500);
     if (statusInfo.status === 'online' || isDegraded) {
       return (
         <span
@@ -137,7 +137,7 @@ export const SettingsScreen: React.FC = () => {
   };
 
   const checkAllProviderStatuses = async () => {
-    await checkAllProvidersHealth({ includeDirectory: false });
+    await checkAllProvidersHealth({ includeDirectory: false, force: true });
   };
 
   const handleInstallRepository = async (e?: React.FormEvent) => {
@@ -714,6 +714,7 @@ export const SettingsScreen: React.FC = () => {
                 { key: 'cloudstream', name: 'CloudStream Plugins', desc: 'Installed repo plugin resolver' },
                 { key: 'cinemeta', name: 'Cinemeta Catalog', desc: 'Official metadata database' },
                 { key: 'opensubtitles', name: 'OpenSubtitles v3', desc: 'Multi-language subtitle engine' },
+                { key: 'bengali_serials', name: 'Zee Bangla & Bengali Serials', desc: 'Daily Zee Bangla serials (Kusum, Parineeta) & Sony AATH (Gopal Bhar)' },
               ].map((prov) => {
                 const active = providerToggles[prov.key] ?? true;
                 const statusInfo = providerHealthMap[`core:${prov.key}`];

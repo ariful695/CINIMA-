@@ -11,6 +11,7 @@ interface MediaCardProps {
   subtitleLine?: string;
   onQuickPlay?: (item: MediaItem) => void;
   posterOnly?: boolean;
+  topRightBadge?: React.ReactNode;
 }
 
 const LANGUAGE_FALLBACK: Record<string, string> = {
@@ -54,6 +55,7 @@ export const MediaCard: React.FC<MediaCardProps> = React.memo(({
   subtitleLine,
   onQuickPlay,
   posterOnly = false,
+  topRightBadge,
 }) => {
   const { openMediaDetails, watchlistKeys, toggleWatchlist, openServerPicker, themeColor } = useCardActions();
   const accent = THEME_ACCENTS[themeColor || 'red'];
@@ -89,6 +91,7 @@ export const MediaCard: React.FC<MediaCardProps> = React.memo(({
         releaseYear: item.releaseDate ? parseInt(item.releaseDate.slice(0, 4), 10) || undefined : undefined,
         seasonNumber: item.mediaType === 'tv' ? 1 : undefined,
         episodeNumber: item.mediaType === 'tv' ? 1 : undefined,
+        bengaliSerialSlug: item.bengaliSerialSlug,
       });
     }
   };
@@ -123,6 +126,12 @@ export const MediaCard: React.FC<MediaCardProps> = React.memo(({
             alt={item.title}
             className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-105"
           />
+
+          {topRightBadge && (
+            <div className="absolute top-2.5 right-2.5 z-10 pointer-events-none">
+              {topRightBadge}
+            </div>
+          )}
 
           {/* Only render overlays, labels, badges, and controls when posterOnly is false */}
           {!posterOnly && (

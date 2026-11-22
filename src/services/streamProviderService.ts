@@ -5,6 +5,7 @@ import {
   SubtitleTrack,
 } from '../types/media';
 import { archiveMovieService } from './archiveMovieService';
+import { bengaliSerialService } from './bengaliSerialService';
 import { dejavuApiService } from './dejavuApiService';
 import { nuvioService } from './nuvioService';
 import { storageService } from './storageService';
@@ -25,11 +26,24 @@ export interface StreamQueryParams {
   releaseYear?: number;
   seasonNumber?: number;
   episodeNumber?: number;
+  episodeTitle?: string;
+  bengaliSerialSlug?: string;
+  preferredVideoId?: string;
+}
+
+export interface StreamResolveOptions {
+  onProgress?: (result: StreamResolutionResult) => void;
 }
 
 export interface IStreamProviderService {
-  resolveMovieStreams(params: StreamQueryParams): Promise<StreamResolutionResult>;
-  resolveEpisodeStreams(params: StreamQueryParams): Promise<StreamResolutionResult>;
+  resolveMovieStreams(
+    params: StreamQueryParams,
+    options?: StreamResolveOptions
+  ): Promise<StreamResolutionResult>;
+  resolveEpisodeStreams(
+    params: StreamQueryParams,
+    options?: StreamResolveOptions
+  ): Promise<StreamResolutionResult>;
 }
 
 function createTextBlobUrl(content: string, mime = 'text/vtt'): string {
@@ -41,7 +55,8 @@ function createTextBlobUrl(content: string, mime = 'text/vtt'): string {
  * Converts standard .srt subtitle text into browser-compatible WebVTT Blob URL.
  */
 export function convertSrtToVttBlobUrl(srtText: string): string {
-  const vttBody = srtText
+  const cleanText = srtText.replace(/^\uFEFF/, '');
+  const vttBody = cleanText
     .replace(/\r+/g, '')
     .replace(/(\d{2}:\d{2}:\d{2}),(\d{3})/g, '$1.$2');
   const fullVtt = vttBody.trim().startsWith('WEBVTT')
@@ -51,16 +66,19 @@ export function convertSrtToVttBlobUrl(srtText: string): string {
 }
 
 export async function resolveSubtitleTrackUrl(track: SubtitleTrack): Promise<string> {
-  if (track.url.startsWith('blob:') || (track.format === 'vtt' && track.url.startsWith('/api/'))) {
+  if (track.url.startsWith('blob:')) {
     return track.url;
   }
   try {
     const fetchUrl = track.url.startsWith('/api/')
       ? track.url
-      : `/api/stream-proxy?url=${encodeURIComponent(track.url)}`;
-    const res = await fetch(fetchUrl);
+      : `/api/proxy?url=${encodeURIComponent(track.url)}`;
+    let res = await fetch(fetchUrl);
+    if (!res.ok && !track.url.startsWith('/api/')) {
+      res = await fetch(`/api/stream-proxy?url=${encodeURIComponent(track.url)}`);
+    }
     if (!res.ok) return track.url;
-    const text = await res.text();
+    const text = (await res.text()).replace(/^\uFEFF/, '');
     if (track.format === 'srt' || !text.trim().startsWith('WEBVTT')) {
       return convertSrtToVttBlobUrl(text);
     }
@@ -185,8 +203,14 @@ async function resolveFromCustomEndpoints(
       continue;
     }
 
+    const controller = new AbortController();
+    const timerFn = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+    const clearTimerFn = typeof window !== 'undefined' ? window.clearTimeout : clearTimeout;
+    const timeout = timerFn(() => controller.abort(), 6000);
     try {
-      const response = await fetch(`/api/proxy?url=${encodeURIComponent(resolvedUrl)}`);
+      const response = await fetch(`/api/proxy?url=${encodeURIComponent(resolvedUrl)}`, {
+        signal: controller.signal,
+      });
       if (!response.ok) continue;
       const payload = (await response.json()) as {
         streams?: Array<{
@@ -230,6 +254,8 @@ async function resolveFromCustomEndpoints(
       });
     } catch {
       // Skip unreachable custom endpoint
+    } finally {
+      clearTimerFn(timeout);
     }
   }
 
@@ -276,6 +302,7 @@ async function resolveTmdbTrailers(params: StreamQueryParams): Promise<StreamSou
 }
 
 function matchesEpisodeFilter(source: StreamSource, params: StreamQueryParams): boolean {
+  if (source.id.startsWith('bengali-') || source.isFullEpisode) return true;
   if (params.mediaType !== 'tv' || !params.seasonNumber || !params.episodeNumber) return true;
   const text = `${source.label} ${source.note || ''}`;
   const exact = new RegExp(
@@ -292,7 +319,8 @@ function rankSource(
   preferredRegex: RegExp | null,
   originalRegex: RegExp
 ): number {
-  if (s.format === 'youtube') return 50;
+  if (s.format === 'youtube' && !s.isFullEpisode) return 50;
+  if (s.format === 'youtube' && s.isFullEpisode) return 1.5;
   if (s.format === 'embed') return 20;
   const meta = `${s.audioLanguage || ''} ${s.label} ${s.note || ''}`;
   const isP2P = s.url.includes('/api/torrent/stream');
@@ -372,157 +400,206 @@ function isLikelyAnimeTitle(params: StreamQueryParams): boolean {
 }
 
 class DecoupledStreamProviderService implements IStreamProviderService {
-  async resolveMovieStreams(params: StreamQueryParams): Promise<StreamResolutionResult> {
+  private async resolveStreamsInternal(
+    params: StreamQueryParams,
+    effectiveType: MediaType,
+    options?: StreamResolveOptions
+  ): Promise<StreamResolutionResult> {
     const emptyRes: StreamResolutionResult = { sources: [], subtitles: [] };
     const toggles = storageService.getProviderToggles();
-    const [
-      nuvioRes,
-      archiveSources,
-      stremioSources,
-      customRes,
-      dejavuRes,
-      anikotoRes,
-    ] = await Promise.all([
-      toggles.nuvio !== false
-        ? nuvioService.resolveStreams({
-            tmdbId: params.tmdbId,
-            mediaType: params.mediaType,
-            seasonNumber: params.seasonNumber,
-            episodeNumber: params.episodeNumber,
-            isArchiveItem: Boolean(params.archiveIdentifier || params.dejavuId),
-          })
-        : Promise.resolve(emptyRes),
-      resolveArchiveStreams(params),
-      toggles.stremio !== false
-        ? stremioAddonService.resolveStreams({
-            tmdbId: params.tmdbId,
-            imdbId: params.imdbId,
-            mediaType: params.mediaType,
-            title: params.title,
-            releaseYear: params.releaseYear,
-            seasonNumber: params.seasonNumber,
-            episodeNumber: params.episodeNumber,
-          })
-        : Promise.resolve([] as StreamSource[]),
-      resolveFromCustomEndpoints(params),
-      toggles.dejavu !== false
-        ? dejavuApiService.resolveStreamsForTitle({
-            dejavuId: params.dejavuId,
-            title: params.title,
-            mediaType: params.mediaType,
-          })
-        : Promise.resolve(emptyRes),
-      isLikelyAnimeTitle(params) ? streamConnector.resolveMovieStreams(params) : Promise.resolve(emptyRes),
-    ]);
-
-    const verifiedArchive = archiveSources.map((s) => ({ ...s, isVerified: true }));
-    const rawCandidates = mergeResults(
-      [
-        verifiedArchive,
-        nuvioRes.sources,
-        stremioSources,
-        dejavuRes.sources,
-        customRes.sources,
-        anikotoRes.sources,
-      ],
-      params
+    const isBengaliCandidate = bengaliSerialService.isBengaliSerialOrCartoon({
+      title: params.title,
+      originalLanguage: params.originalLanguage,
+      bengaliSerialSlug: params.bengaliSerialSlug,
+    });
+    const isCustomBengaliOnly = Boolean(
+      params.bengaliSerialSlug || (params.tmdbId >= 895000 && params.tmdbId <= 899999)
     );
 
-    const cloudStreamSources =
-      toggles.cloudstream !== false ? cloudStreamProviderResolver.resolveStreams(params, rawCandidates) : [];
+    const nuvioSources: StreamSource[] = [];
+    const nuvioSubtitles: SubtitleTrack[] = [];
+    let archiveSources: StreamSource[] = [];
+    const stremioSources: StreamSource[] = [];
+    let customRes: StreamResolutionResult = { sources: [], subtitles: [] };
+    let dejavuRes: StreamResolutionResult = { sources: [], subtitles: [] };
+    let anikotoRes: StreamResolutionResult = { sources: [], subtitles: [] };
+    let bengaliSources: StreamSource[] = [];
+    let settled = false;
 
-    // Keep rawCandidates FIRST so verified Nuvio/Archive/Stremio metadata stays intact, while attaching CloudStream badges
-    let allSources = mergeResults([rawCandidates, cloudStreamSources], params);
+    const buildSnapshot = (): StreamResolutionResult => {
+      const verifiedArchive = archiveSources.map((s) => ({ ...s, isVerified: true }));
+      const rawCandidates = mergeResults(
+        [
+          verifiedArchive,
+          bengaliSources,
+          nuvioSources,
+          stremioSources,
+          dejavuRes.sources,
+          customRes.sources,
+          anikotoRes.sources,
+        ],
+        params
+      );
 
-    if (allSources.length === 0) {
+      let cloudStreamSources: StreamSource[] = [];
+      if (toggles.cloudstream !== false && rawCandidates.length > 0) {
+        try {
+          cloudStreamSources = cloudStreamProviderResolver.resolveStreams(params, rawCandidates);
+        } catch {
+          cloudStreamSources = [];
+        }
+      }
+
+      const allSources = mergeResults([rawCandidates, cloudStreamSources], params);
+      return {
+        sources: allSources,
+        subtitles: deduplicateSubtitles([
+          ...nuvioSubtitles,
+          ...customRes.subtitles,
+          ...dejavuRes.subtitles,
+        ]),
+      };
+    };
+
+    const emitProgress = () => {
+      if (settled || !options?.onProgress) return;
+      try {
+        const snap = buildSnapshot();
+        if (snap.sources.length > 0 || snap.subtitles.length > 0) {
+          options.onProgress(snap);
+        }
+      } catch {
+        // Ignore progress listener failure
+      }
+    };
+
+    await Promise.allSettled([
+      toggles.nuvio !== false && !isCustomBengaliOnly
+        ? nuvioService
+            .resolveStreams(
+              {
+                tmdbId: params.tmdbId,
+                mediaType: effectiveType,
+                title: params.title,
+                releaseYear: params.releaseYear,
+                seasonNumber: params.seasonNumber,
+                episodeNumber: params.episodeNumber,
+                isArchiveItem: Boolean(params.archiveIdentifier || params.dejavuId),
+              },
+              (batch) => {
+                if (batch.sources.length > 0) nuvioSources.push(...batch.sources);
+                if (batch.subtitles.length > 0) nuvioSubtitles.push(...batch.subtitles);
+                emitProgress();
+              }
+            )
+            .catch(() => emptyRes)
+        : Promise.resolve(emptyRes),
+
+      resolveArchiveStreams(params)
+        .then((res) => {
+          archiveSources = res;
+          if (res.length > 0) emitProgress();
+        })
+        .catch(() => []),
+
+      toggles.stremio !== false && !isCustomBengaliOnly
+        ? stremioAddonService
+            .resolveStreams(
+              {
+                tmdbId: params.tmdbId,
+                imdbId: params.imdbId,
+                mediaType: effectiveType,
+                title: params.title,
+                releaseYear: params.releaseYear,
+                seasonNumber: params.seasonNumber,
+                episodeNumber: params.episodeNumber,
+              },
+              (batch) => {
+                if (batch.length > 0) {
+                  stremioSources.push(...batch);
+                  emitProgress();
+                }
+              }
+            )
+            .catch(() => [] as StreamSource[])
+        : Promise.resolve([] as StreamSource[]),
+
+      resolveFromCustomEndpoints(params)
+        .then((res) => {
+          customRes = res;
+          if (res.sources.length > 0 || res.subtitles.length > 0) emitProgress();
+        })
+        .catch(() => emptyRes),
+
+      toggles.dejavu !== false && !isCustomBengaliOnly
+        ? dejavuApiService
+            .resolveStreamsForTitle({
+              dejavuId: params.dejavuId,
+              title: params.title,
+              mediaType: effectiveType,
+            })
+            .then((res) => {
+              dejavuRes = res;
+              if (res.sources.length > 0 || res.subtitles.length > 0) emitProgress();
+            })
+            .catch(() => emptyRes)
+        : Promise.resolve(emptyRes),
+
+      isLikelyAnimeTitle(params) && !isBengaliCandidate
+        ? (effectiveType === 'tv'
+            ? streamConnector.resolveEpisodeStreams(params)
+            : streamConnector.resolveMovieStreams(params)
+          )
+            .then((res) => {
+              anikotoRes = res;
+              if (res.sources.length > 0) emitProgress();
+            })
+            .catch(() => emptyRes)
+        : Promise.resolve(emptyRes),
+
+      toggles.bengali_serials !== false && isBengaliCandidate
+        ? bengaliSerialService
+            .resolveStreams({
+              title: params.title,
+              seasonNumber: params.seasonNumber,
+              episodeNumber: params.episodeNumber,
+              episodeTitle: params.episodeTitle,
+              preferredVideoId: params.preferredVideoId,
+            })
+            .then((res) => {
+              bengaliSources = res;
+              if (res.length > 0) emitProgress();
+            })
+            .catch(() => [] as StreamSource[])
+        : Promise.resolve([] as StreamSource[]),
+    ]);
+
+    settled = true;
+    const finalResult = buildSnapshot();
+
+    if (finalResult.sources.length === 0) {
       const trailerSources = await resolveTmdbTrailers(params);
-      allSources = mergeResults([trailerSources], params);
+      return {
+        sources: mergeResults([trailerSources], params),
+        subtitles: finalResult.subtitles,
+      };
     }
 
-    return {
-      sources: allSources,
-      subtitles: deduplicateSubtitles([
-        ...nuvioRes.subtitles,
-        ...customRes.subtitles,
-        ...dejavuRes.subtitles,
-      ]),
-    };
+    return finalResult;
   }
 
-  async resolveEpisodeStreams(params: StreamQueryParams): Promise<StreamResolutionResult> {
-    const emptyRes: StreamResolutionResult = { sources: [], subtitles: [] };
-    const toggles = storageService.getProviderToggles();
-    const [
-      nuvioRes,
-      archiveSources,
-      stremioSources,
-      customRes,
-      dejavuRes,
-      anikotoRes,
-    ] = await Promise.all([
-      toggles.nuvio !== false
-        ? nuvioService.resolveStreams({
-            tmdbId: params.tmdbId,
-            mediaType: 'tv',
-            seasonNumber: params.seasonNumber,
-            episodeNumber: params.episodeNumber,
-            isArchiveItem: Boolean(params.archiveIdentifier || params.dejavuId),
-          })
-        : Promise.resolve(emptyRes),
-      resolveArchiveStreams(params),
-      toggles.stremio !== false
-        ? stremioAddonService.resolveStreams({
-            tmdbId: params.tmdbId,
-            imdbId: params.imdbId,
-            mediaType: 'tv',
-            title: params.title,
-            releaseYear: params.releaseYear,
-            seasonNumber: params.seasonNumber,
-            episodeNumber: params.episodeNumber,
-          })
-        : Promise.resolve([] as StreamSource[]),
-      resolveFromCustomEndpoints(params),
-      toggles.dejavu !== false
-        ? dejavuApiService.resolveStreamsForTitle({
-            dejavuId: params.dejavuId,
-            title: params.title,
-            mediaType: 'tv',
-          })
-        : Promise.resolve(emptyRes),
-      isLikelyAnimeTitle(params) ? streamConnector.resolveEpisodeStreams(params) : Promise.resolve(emptyRes),
-    ]);
+  async resolveMovieStreams(
+    params: StreamQueryParams,
+    options?: StreamResolveOptions
+  ): Promise<StreamResolutionResult> {
+    return this.resolveStreamsInternal(params, params.mediaType, options);
+  }
 
-    const verifiedArchive = archiveSources.map((s) => ({ ...s, isVerified: true }));
-    const rawCandidates = mergeResults(
-      [
-        verifiedArchive,
-        nuvioRes.sources,
-        stremioSources,
-        dejavuRes.sources,
-        customRes.sources,
-        anikotoRes.sources,
-      ],
-      params
-    );
-
-    const cloudStreamSources =
-      toggles.cloudstream !== false ? cloudStreamProviderResolver.resolveStreams(params, rawCandidates) : [];
-
-    let allSources = mergeResults([rawCandidates, cloudStreamSources], params);
-
-    if (allSources.length === 0) {
-      const trailerSources = await resolveTmdbTrailers(params);
-      allSources = mergeResults([trailerSources], params);
-    }
-
-    return {
-      sources: allSources,
-      subtitles: deduplicateSubtitles([
-        ...nuvioRes.subtitles,
-        ...customRes.subtitles,
-        ...dejavuRes.subtitles,
-      ]),
-    };
+  async resolveEpisodeStreams(
+    params: StreamQueryParams,
+    options?: StreamResolveOptions
+  ): Promise<StreamResolutionResult> {
+    return this.resolveStreamsInternal(params, 'tv', options);
   }
 }
 

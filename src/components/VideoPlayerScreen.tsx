@@ -60,6 +60,7 @@ interface P2PPrebufferStatus {
   fileIdx?: number;
   fileName?: string;
   fileLength?: number;
+  fileSize?: number;
   peers: number;
   seeders: number;
   speedKbps: number;
@@ -219,6 +220,204 @@ function selectMostCompatibleSource(
   return scored[0].source;
 }
 
+const P2PPrebufferHUD: React.FC<{
+  status: P2PPrebufferStatus | null;
+  activeSource: StreamSource;
+  accentHex: string;
+  onCancel: () => void;
+  onSwitchServer?: () => void;
+  onContinueAnyway: () => void;
+  hasAlternativeSources: boolean;
+}> = ({
+  status,
+  activeSource,
+  accentHex,
+  onCancel,
+  onSwitchServer,
+  onContinueAnyway,
+  hasAlternativeSources,
+}) => {
+  const [displayPct, setDisplayPct] = useState(0);
+  const targetPct = status?.progressPct ?? 0;
+  const currentPctRef = useRef(0);
+
+  useEffect(() => {
+    let animId: number;
+    const update = () => {
+      const diff = targetPct - currentPctRef.current;
+      if (Math.abs(diff) > 0.1) {
+        currentPctRef.current += diff * 0.18;
+        const rounded = Math.round(Math.min(100, Math.max(0, currentPctRef.current)));
+        setDisplayPct((prev) => (prev !== rounded ? rounded : prev));
+        animId = requestAnimationFrame(update);
+      } else {
+        currentPctRef.current = targetPct;
+        const rounded = Math.round(targetPct);
+        setDisplayPct((prev) => (prev !== rounded ? rounded : prev));
+      }
+    };
+    animId = requestAnimationFrame(update);
+    return () => cancelAnimationFrame(animId);
+  }, [targetPct]);
+
+  const mbPre = ((status?.prebufferedBytes || 0) / (1024 * 1024)).toFixed(1);
+  const mbTarget = ((status?.targetBytes || 2.5 * 1024 * 1024) / (1024 * 1024)).toFixed(1);
+  const speedStr =
+    status && status.speedKbps >= 1024
+      ? `${(status.speedKbps / 1024).toFixed(1)} MB/s`
+      : `${status?.speedKbps || 0} KB/s`;
+
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      className="player-interactive absolute inset-0 z-[25] flex items-center justify-center p-4 transition-opacity duration-150"
+      style={{ backgroundColor: 'rgba(5, 7, 11, 0.72)' }}
+    >
+      <div
+        className="max-w-md w-full rounded-2xl border border-white/15 p-5 sm:p-6 space-y-4 shadow-2xl"
+        style={{ backgroundColor: 'rgba(10, 14, 22, 0.78)' }}
+      >
+        {/* Header with Circular Arc Spinner */}
+        <div className="flex items-center gap-3.5">
+          <div className="relative h-10 w-10 shrink-0 flex items-center justify-center">
+            <svg className="h-10 w-10 ks-spin-arc" viewBox="0 0 40 40">
+              <circle
+                cx="20"
+                cy="20"
+                r="16"
+                fill="none"
+                stroke="rgba(255, 255, 255, 0.12)"
+                strokeWidth="3.5"
+              />
+              <circle
+                cx="20"
+                cy="20"
+                r="16"
+                fill="none"
+                stroke={accentHex}
+                strokeWidth="3.5"
+                strokeDasharray="75 100"
+                strokeLinecap="round"
+              />
+            </svg>
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
+                P2P Swarm Buffer
+              </span>
+              <span className="text-xs text-slate-400 font-mono-tabular">
+                {activeSource.quality || 'Auto'}
+              </span>
+            </div>
+            <h3 className="text-sm sm:text-base font-bold text-white truncate mt-1">
+              {activeSource.providerName}
+            </h3>
+            <p className="text-xs text-slate-400 truncate">
+              {status?.fileName || activeSource.label}
+            </p>
+          </div>
+        </div>
+
+        {/* 60fps Smooth Lerp Progress Bar */}
+        <div className="space-y-1.5 pt-1">
+          <div className="flex items-center justify-between text-[11px] font-mono-tabular text-slate-300">
+            <span>
+              {!status?.ready
+                ? 'Connecting to swarm...'
+                : !status.headReady
+                ? 'Buffering stream header...'
+                : 'Sequential pre-buffering...'}
+            </span>
+            <span className="font-bold text-white">{Math.round(displayPct)}%</span>
+          </div>
+          <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden">
+            <div
+              className="h-full rounded-full transition-none"
+              style={{
+                width: `${Math.min(100, Math.max(3, displayPct))}%`,
+                backgroundColor: accentHex,
+              }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-[11px] font-mono-tabular text-slate-400">
+            <span>
+              {mbPre} / {mbTarget} MB
+            </span>
+            <span className="text-slate-200 font-semibold">{speedStr}</span>
+          </div>
+        </div>
+
+        {/* Swarm Metrics Grid */}
+        <div className="grid grid-cols-4 gap-2 text-center pt-1">
+          <div className="rounded-xl bg-white/[0.05] border border-white/10 py-2 px-1">
+            <div className="text-xs sm:text-sm font-bold font-mono-tabular text-white">
+              {status?.peers ?? 0}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-0.5">Peers</div>
+          </div>
+          <div className="rounded-xl bg-white/[0.05] border border-white/10 py-2 px-1">
+            <div className="text-xs sm:text-sm font-bold font-mono-tabular text-emerald-400">
+              {status?.seeders ?? 0}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-0.5">Seeds</div>
+          </div>
+          <div className="rounded-xl bg-white/[0.05] border border-white/10 py-2 px-1">
+            <div
+              className={`text-xs sm:text-sm font-bold ${
+                status?.headReady ? 'text-emerald-400' : 'text-amber-400'
+              }`}
+            >
+              {status?.headReady ? 'Ready' : 'Wait'}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-0.5">Header</div>
+          </div>
+          <div className="rounded-xl bg-white/[0.05] border border-white/10 py-2 px-1">
+            <div
+              className={`text-xs sm:text-sm font-bold ${
+                status?.tailReady ? 'text-emerald-400' : 'text-slate-400'
+              }`}
+            >
+              {status?.tailReady ? 'Ready' : 'Wait'}
+            </div>
+            <div className="text-[10px] text-slate-400 mt-0.5">End Meta</div>
+          </div>
+        </div>
+
+        {/* Action Controls */}
+        <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2 border-t border-white/10">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="min-h-[40px] px-4 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-semibold text-slate-200 transition-colors"
+          >
+            Cancel
+          </button>
+          {hasAlternativeSources && onSwitchServer && (
+            <button
+              type="button"
+              onClick={onSwitchServer}
+              className="min-h-[40px] px-4 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
+            >
+              <Server className="h-3.5 w-3.5" />
+              <span>Switch Server</span>
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onContinueAnyway}
+            className="min-h-[40px] px-4 rounded-xl text-xs font-semibold text-white inline-flex items-center gap-1.5 shadow-lg active:scale-95 transition-transform"
+            style={{ backgroundColor: accentHex }}
+          >
+            <Play className="h-3.5 w-3.5 fill-current" />
+            <span>Continue Anyway</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session }) => {
   const {
     closePlayback,
@@ -302,11 +501,57 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const isLive = session.mediaType === 'live';
 
+  const playbackRateRef = useRef(playbackRate);
+  const isMutedRef = useRef(isMuted);
+  const volumeRef = useRef(volume);
+  const seekOffsetSecondsRef = useRef<number>(0);
+  const [probedDurationSeconds, setProbedDurationSeconds] = useState<number>(0);
+
+  useEffect(() => {
+    playbackRateRef.current = playbackRate;
+    isMutedRef.current = isMuted;
+    volumeRef.current = volume;
+  }, [playbackRate, isMuted, volume]);
+
+  useEffect(() => {
+    seekOffsetSecondsRef.current = 0;
+    const initialDur =
+      session.runtimeMinutes && session.runtimeMinutes > 0 ? session.runtimeMinutes * 60 : 0;
+    setProbedDurationSeconds(initialDur);
+    if (initialDur > 0) setDuration(initialDur);
+
+    if (activeSource?.url && !isLive) {
+      fetch(activeSource.url, { method: 'HEAD' })
+        .then((res) => {
+          const hdr = res.headers.get('x-content-duration');
+          if (hdr) {
+            const parsed = parseFloat(hdr);
+            if (Number.isFinite(parsed) && parsed > 0) {
+              setProbedDurationSeconds(parsed);
+              setDuration(parsed);
+            }
+          }
+        })
+        .catch(() => {});
+    }
+  }, [activeSource?.url, isLive, session.runtimeMinutes]);
+
+  const effectiveDuration =
+    Number.isFinite(duration) && duration > 0
+      ? duration
+      : probedDurationSeconds > 0
+      ? probedDurationSeconds
+      : session.runtimeMinutes && session.runtimeMinutes > 0
+      ? session.runtimeMinutes * 60
+      : 0;
+
   const switchLiveChannel = useCallback(
     (direction: 1 | -1) => {
       if (!isLive || liveChannels.length <= 1 || !session.liveChannel) return;
-      const httpsPool = liveChannels.filter((c) => c.streamUrl.startsWith('https://'));
-      const pool = httpsPool.length > 0 ? httpsPool : liveChannels;
+      const validPool = liveChannels.filter(
+        (c) => c.streamUrl.startsWith('https://') || c.streamUrl.startsWith('/api/')
+      );
+      const pool = validPool.length > 0 ? validPool : liveChannels;
       const currentIdx = pool.findIndex((c) => c.id === session.liveChannel?.id);
       const startIdx = currentIdx >= 0 ? currentIdx : 0;
 
@@ -486,56 +731,63 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         return;
       }
 
-      const resolved =
-        session.mediaType === 'tv'
-          ? await streamProviderService.resolveEpisodeStreams({
-              tmdbId: session.mediaId,
-              imdbId: session.imdbId,
-              dejavuId: session.dejavuId,
-              archiveIdentifier: session.archiveIdentifier,
-              mediaType: 'tv',
-              title: session.title,
-              genreIds: session.genreIds,
-              originalLanguage: session.originalLanguage,
-              releaseYear: session.releaseYear,
-              seasonNumber: session.seasonNumber,
-              episodeNumber: session.episodeNumber,
-            })
-          : await streamProviderService.resolveMovieStreams({
-              tmdbId: session.mediaId,
-              imdbId: session.imdbId,
-              dejavuId: session.dejavuId,
-              archiveIdentifier: session.archiveIdentifier,
-              mediaType: 'movie',
-              title: session.title,
-              genreIds: session.genreIds,
-              originalLanguage: session.originalLanguage,
-              releaseYear: session.releaseYear,
-            });
+      try {
+        const resolved =
+          session.mediaType === 'tv'
+            ? await streamProviderService.resolveEpisodeStreams({
+                tmdbId: session.mediaId,
+                imdbId: session.imdbId,
+                dejavuId: session.dejavuId,
+                archiveIdentifier: session.archiveIdentifier,
+                mediaType: 'tv',
+                title: session.title,
+                genreIds: session.genreIds,
+                originalLanguage: session.originalLanguage,
+                releaseYear: session.releaseYear,
+                seasonNumber: session.seasonNumber,
+                episodeNumber: session.episodeNumber,
+              })
+            : await streamProviderService.resolveMovieStreams({
+                tmdbId: session.mediaId,
+                imdbId: session.imdbId,
+                dejavuId: session.dejavuId,
+                archiveIdentifier: session.archiveIdentifier,
+                mediaType: 'movie',
+                title: session.title,
+                genreIds: session.genreIds,
+                originalLanguage: session.originalLanguage,
+                releaseYear: session.releaseYear,
+              });
 
-      if (!active) return;
-      setSources(resolved.sources);
-      const preferred =
-        (session.preferredSourceId
-          ? resolved.sources.find((s) => s.id === session.preferredSourceId)
-          : null) ||
-        selectMostCompatibleSource(resolved.sources) ||
-        resolved.sources[0] ||
-        null;
-      setActiveSource(preferred);
-      setSubtitles(resolved.subtitles);
-      if (!preferred) {
-        setIsBuffering(false);
-        setStreamError('No playable stream servers were found for this title.');
+        if (!active) return;
+        setSources(resolved.sources);
+        const preferred =
+          (session.preferredSourceId
+            ? resolved.sources.find((s) => s.id === session.preferredSourceId)
+            : null) ||
+          selectMostCompatibleSource(resolved.sources) ||
+          resolved.sources[0] ||
+          null;
+        setActiveSource(preferred);
+        setSubtitles(resolved.subtitles);
+        if (!preferred) {
+          setIsBuffering(false);
+          setStreamError('No playable stream servers were found for this title.');
+        }
+
+        const urlMap: Record<string, string> = {};
+        await Promise.allSettled(
+          resolved.subtitles.map(async (sub) => {
+            urlMap[sub.id] = await resolveSubtitleTrackUrl(sub);
+          })
+        );
+        if (active) setResolvedSubUrls(urlMap);
+      } catch {
+        if (active) {
+          setIsBuffering(false);
+          setStreamError('Failed to resolve playable stream servers.');
+        }
       }
-
-      const urlMap: Record<string, string> = {};
-      await Promise.all(
-        resolved.subtitles.map(async (sub) => {
-          urlMap[sub.id] = await resolveSubtitleTrackUrl(sub);
-        })
-      );
-      if (active) setResolvedSubUrls(urlMap);
     };
 
     void init();
@@ -602,9 +854,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       }
       video.pause();
       setIsPlaying(false);
-      persistProgress(video.currentTime, video.duration);
+      const cur = seekOffsetSecondsRef.current + (video.currentTime || 0);
+      const dur = effectiveDuration > 0 ? effectiveDuration : video.duration;
+      persistProgress(cur, dur);
     },
-    [persistProgress]
+    [effectiveDuration, persistProgress]
   );
 
   const isActiveP2PTorrent = Boolean(
@@ -712,6 +966,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     });
 
     const controller = new AbortController();
+    const startTimeMs = Date.now();
     let pollTimer: number | null = null;
     let maxWaitTimer: number | null = null;
 
@@ -736,7 +991,8 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         const data = (await res.json()) as P2PPrebufferStatus;
         if (cancelled) return;
         setP2pStatus(data);
-        if (data.readyToPlay) {
+        const elapsedMs = Date.now() - startTimeMs;
+        if (data.readyToPlay || (data.headReady && elapsedMs >= 15000)) {
           stopTimers();
           setP2pAttachUrl(activeSource.url);
         }
@@ -780,7 +1036,8 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         const data = (await res.json()) as P2PPrebufferStatus;
         if (cancelled) return;
         setP2pStatus(data);
-        if (data.readyToPlay) {
+        const elapsedMs = Date.now() - startTimeMs;
+        if (data.readyToPlay || (data.headReady && elapsedMs >= 15000)) {
           stopTimers();
           setP2pAttachUrl(activeSource.url);
         }
@@ -875,11 +1132,15 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     const handleLoadedMetadata = () => {
       if (cancelled) return;
       clearStallTimer();
-      if (!isLive && startTime > 0 && video.duration > startTime + 2) {
+      if (
+        !isLive &&
+        startTime > 0 &&
+        (video.duration > startTime + 2 || effectiveDuration > startTime + 2)
+      ) {
         video.currentTime = startTime;
       }
-      video.playbackRate = playbackRate;
-      video.volume = isMuted ? 0 : volume;
+      video.playbackRate = playbackRateRef.current;
+      video.volume = isMutedRef.current ? 0 : volumeRef.current;
       if (!hlsActiveRef.current) {
         syncNativeAudioTracks();
       }
@@ -1077,7 +1338,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
     const tracks = Array.from(video.textTracks);
     tracks.forEach((track) => {
-      track.mode = 'hidden';
+      track.mode = 'disabled';
     });
 
     if (activeSubtitleId === 'off') {
@@ -1119,12 +1380,14 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     if (isLive) return;
     const interval = window.setInterval(() => {
       const video = videoRef.current;
-      if (video && !video.paused && video.duration > 0) {
-        persistProgress(video.currentTime, video.duration);
+      const cur = seekOffsetSecondsRef.current + (video?.currentTime || 0);
+      const dur = effectiveDuration > 0 ? effectiveDuration : (video?.duration || 0);
+      if (video && !video.paused && dur > 0) {
+        persistProgress(cur, dur);
       }
     }, 3000);
     return () => window.clearInterval(interval);
-  }, [isLive, persistProgress]);
+  }, [isLive, effectiveDuration, persistProgress]);
 
   // Auto-hide controls timer
   const wakeControls = useCallback(() => {
@@ -1157,16 +1420,37 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     wakeControls();
   }, [safePlay, safePause, wakeControls]);
 
-  const seekBy = useCallback(
-    (delta: number) => {
+  const seekToSeconds = useCallback(
+    (rawTarget: number) => {
       const video = videoRef.current;
       if (!video || isLive) return;
-      const target = Math.min(video.duration || 0, Math.max(0, video.currentTime + delta));
-      video.currentTime = target;
-      setCurrentTime(target);
+      const maxDuration = effectiveDuration > 0 ? effectiveDuration : Infinity;
+      const target = Math.min(maxDuration, Math.max(0, rawTarget));
+
+      if (activeSource?.url.includes('remux=1')) {
+        const baseUrl = activeSource.url.replace(/[?&]ss=\d+/, '');
+        const sep = baseUrl.includes('?') ? '&' : '?';
+        const seekUrl = `${baseUrl}${sep}ss=${Math.floor(target)}`;
+        seekOffsetSecondsRef.current = target;
+        video.src = seekUrl;
+        video.currentTime = 0;
+        setCurrentTime(target);
+        void safePlay(video);
+      } else {
+        video.currentTime = target;
+        setCurrentTime(target);
+      }
       wakeControls();
     },
-    [isLive, wakeControls]
+    [isLive, effectiveDuration, activeSource, safePlay, wakeControls]
+  );
+
+  const seekBy = useCallback(
+    (delta: number) => {
+      const current = seekOffsetSecondsRef.current + (videoRef.current?.currentTime || currentTime);
+      seekToSeconds(current + delta);
+    },
+    [currentTime, seekToSeconds]
   );
 
   const toggleMute = useCallback(() => {
@@ -1196,14 +1480,15 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const handleClose = useCallback(() => {
     const video = videoRef.current;
-    if (video && video.duration > 0) {
-      persistProgress(video.currentTime, video.duration);
+    const dur = effectiveDuration > 0 ? effectiveDuration : (video?.duration || 0);
+    if (video && dur > 0) {
+      persistProgress(seekOffsetSecondsRef.current + (video.currentTime || 0), dur);
     }
     if (document.fullscreenElement) {
       void document.exitFullscreen().catch(() => {});
     }
     closePlayback();
-  }, [closePlayback, persistProgress]);
+  }, [closePlayback, effectiveDuration, persistProgress]);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -1311,8 +1596,8 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   };
 
   const displayTime = seekPreviewTime ?? currentTime;
-  const progressPct = duration > 0 ? (displayTime / duration) * 100 : 0;
-  const bufferedPct = duration > 0 ? (bufferedEnd / duration) * 100 : 0;
+  const progressPct = effectiveDuration > 0 ? (displayTime / effectiveDuration) * 100 : 0;
+  const bufferedPct = effectiveDuration > 0 ? (bufferedEnd / effectiveDuration) * 100 : 0;
 
   // Unified available audio languages (embedded HLS tracks, remux multi-audio tracks, and multi-language streams)
   const unifiedLanguageOptions = useMemo(() => {
@@ -1692,17 +1977,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
               const video = videoRef.current;
               if (!video) return;
               setIsBuffering(false);
+              const computedCurrent = seekOffsetSecondsRef.current + (video.currentTime || 0);
               if (seekPreviewTime === null) {
-                setCurrentTime(video.currentTime);
+                setCurrentTime(computedCurrent);
               }
               if (video.buffered.length > 0) {
-                setBufferedEnd(video.buffered.end(video.buffered.length - 1));
+                setBufferedEnd(
+                  seekOffsetSecondsRef.current + video.buffered.end(video.buffered.length - 1)
+                );
               }
             }}
             onDurationChange={() => {
               const video = videoRef.current;
-              if (video && Number.isFinite(video.duration)) {
-                setDuration(video.duration);
+              if (video && Number.isFinite(video.duration) && video.duration > 0) {
+                if (!activeSource?.url.includes('remux=1') || duration === 0) {
+                  setDuration(video.duration);
+                }
               }
             }}
           >
@@ -1730,123 +2020,20 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         </div>
       )}
 
-      {/* P2P Sequential Pre-Buffering HUD */}
-      {isActiveP2PTorrent && p2pAttachUrl !== activeSource?.url && !streamError && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="player-interactive absolute inset-0 z-[25] flex items-center justify-center bg-black/80 backdrop-blur-md p-5"
-        >
-          <div className="max-w-md w-full rounded-2xl liquid-glass-strong border border-white/15 p-5 space-y-4 shadow-2xl">
-            <div className="flex items-start justify-between gap-3">
-              <div className="min-w-0">
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-purple-300">
-                  P2P Torrent Pre-Buffering
-                </p>
-                <h3 className="text-sm sm:text-base font-bold text-white truncate mt-0.5">
-                  {activeSource?.providerName} · {activeSource?.quality}
-                </h3>
-                <p className="text-xs text-slate-300 truncate">
-                  {p2pStatus?.fileName || activeSource?.label}
-                </p>
-              </div>
-              <Loader2 className="h-5 w-5 animate-spin shrink-0 mt-1" style={{ color: accent.hex }} />
-            </div>
-
-            <div className="space-y-1.5">
-              <div className="flex items-center justify-between text-[11px] font-mono-tabular text-slate-200">
-                <span>
-                  {!p2pStatus?.ready
-                    ? 'Connecting to swarm & torrent metadata...'
-                    : !p2pStatus.headReady || !p2pStatus.tailReady
-                    ? 'Fetching header & tail metadata...'
-                    : 'Sequential pre-buffering...'}
-                </span>
-                <span>{p2pStatus?.progressPct ?? 0}%</span>
-              </div>
-              <div className="w-full h-2 rounded-full bg-white/15 overflow-hidden">
-                <div
-                  className="h-full rounded-full transition-all duration-300"
-                  style={{
-                    width: `${Math.min(100, Math.max(4, p2pStatus?.progressPct ?? 0))}%`,
-                    backgroundColor: accent.hex,
-                  }}
-                />
-              </div>
-              <div className="flex items-center justify-between text-[11px] font-mono-tabular text-slate-400">
-                <span>
-                  {((p2pStatus?.prebufferedBytes || 0) / (1024 * 1024)).toFixed(1)} /{' '}
-                  {((p2pStatus?.targetBytes || 10 * 1024 * 1024) / (1024 * 1024)).toFixed(0)} MB
-                </span>
-                <span>
-                  {p2pStatus && p2pStatus.speedKbps >= 1024
-                    ? `${(p2pStatus.speedKbps / 1024).toFixed(1)} MB/s`
-                    : `${p2pStatus?.speedKbps || 0} KB/s`}
-                </span>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-4 gap-1.5 text-center">
-              <div className="rounded-lg bg-white/[0.06] border border-white/10 py-1.5 px-1">
-                <div className="text-xs font-bold font-mono-tabular text-white">
-                  {p2pStatus?.peers ?? 0}
-                </div>
-                <div className="text-[10px] text-slate-400">Peers</div>
-              </div>
-              <div className="rounded-lg bg-white/[0.06] border border-white/10 py-1.5 px-1">
-                <div className="text-xs font-bold font-mono-tabular text-emerald-300">
-                  {p2pStatus?.seeders ?? 0}
-                </div>
-                <div className="text-[10px] text-slate-400">Seeds</div>
-              </div>
-              <div className="rounded-lg bg-white/[0.06] border border-white/10 py-1.5 px-1">
-                <div className={`text-xs font-bold ${p2pStatus?.headReady ? 'text-emerald-300' : 'text-slate-400'}`}>
-                  {p2pStatus?.headReady ? 'Ready' : 'Wait'}
-                </div>
-                <div className="text-[10px] text-slate-400">Header</div>
-              </div>
-              <div className="rounded-lg bg-white/[0.06] border border-white/10 py-1.5 px-1">
-                <div className={`text-xs font-bold ${p2pStatus?.tailReady ? 'text-emerald-300' : 'text-slate-400'}`}>
-                  {p2pStatus?.tailReady ? 'Ready' : 'Wait'}
-                </div>
-                <div className="text-[10px] text-slate-400">End Meta</div>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
-              <button
-                type="button"
-                onClick={handleClose}
-                className="min-h-[38px] px-3.5 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-medium text-slate-200 transition-colors"
-              >
-                Cancel
-              </button>
-              {sources.length > 1 && (
-                <button
-                  type="button"
-                  onClick={() => setOpenMenu('sources')}
-                  className="min-h-[38px] px-3.5 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
-                >
-                  <Server className="h-3.5 w-3.5" />
-                  <span>Switch Server</span>
-                </button>
-              )}
-              {activeSource && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    p2pBypassForSourceRef.current = activeSource.id;
-                    setP2pBypassTick((t) => t + 1);
-                  }}
-                  className="min-h-[38px] px-4 rounded-xl text-xs font-semibold text-white inline-flex items-center gap-1.5 shadow-lg transition-transform active:scale-95"
-                  style={{ backgroundColor: accent.hex }}
-                >
-                  <Play className="h-3.5 w-3.5 fill-current" />
-                  <span>Continue Anyway</span>
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
+      {/* P2P Sequential Pre-Buffering 60fps HUD */}
+      {isActiveP2PTorrent && p2pAttachUrl !== activeSource?.url && !streamError && activeSource && (
+        <P2PPrebufferHUD
+          status={p2pStatus}
+          activeSource={activeSource}
+          accentHex={accent.hex}
+          onCancel={handleClose}
+          onSwitchServer={sources.length > 1 ? () => setOpenMenu('sources') : undefined}
+          onContinueAnyway={() => {
+            p2pBypassForSourceRef.current = activeSource.id;
+            setP2pBypassTick((t) => t + 1);
+          }}
+          hasAlternativeSources={sources.length > 1}
+        />
       )}
 
       {/* Buffering Spinner */}
@@ -2170,7 +2357,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                   <input
                     type="range"
                     min={0}
-                    max={duration || 100}
+                    max={effectiveDuration || 100}
                     step={0.5}
                     value={displayTime}
                     aria-label="Seek timeline"
@@ -2180,22 +2367,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                       setCurrentTime(next);
                     }}
                     onPointerUp={() => {
-                      if (seekPreviewTime !== null && videoRef.current) {
-                        videoRef.current.currentTime = seekPreviewTime;
+                      if (seekPreviewTime !== null) {
+                        seekToSeconds(seekPreviewTime);
                       }
                       setSeekPreviewTime(null);
                       wakeControls();
                     }}
                     onTouchEnd={() => {
-                      if (seekPreviewTime !== null && videoRef.current) {
-                        videoRef.current.currentTime = seekPreviewTime;
+                      if (seekPreviewTime !== null) {
+                        seekToSeconds(seekPreviewTime);
                       }
                       setSeekPreviewTime(null);
                       wakeControls();
                     }}
                     onKeyUp={() => {
-                      if (seekPreviewTime !== null && videoRef.current) {
-                        videoRef.current.currentTime = seekPreviewTime;
+                      if (seekPreviewTime !== null) {
+                        seekToSeconds(seekPreviewTime);
                       }
                       setSeekPreviewTime(null);
                       wakeControls();
@@ -2205,7 +2392,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                 </div>
 
                 <span className="text-xs font-mono-tabular text-slate-400 w-14">
-                  {formatClock(duration)}
+                  {formatClock(effectiveDuration)}
                 </span>
               </div>
             ) : (

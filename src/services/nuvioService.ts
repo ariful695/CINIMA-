@@ -349,13 +349,18 @@ export const nuvioService = {
     }
   },
 
-  async resolveStreams(params: {
-    tmdbId: number;
-    mediaType: MediaType;
-    seasonNumber?: number;
-    episodeNumber?: number;
-    isArchiveItem?: boolean;
-  }): Promise<StreamResolutionResult & { scraperResults?: NuvioScraperRunResult[] }> {
+  async resolveStreams(
+    params: {
+      tmdbId: number;
+      mediaType: MediaType;
+      title?: string;
+      releaseYear?: number;
+      seasonNumber?: number;
+      episodeNumber?: number;
+      isArchiveItem?: boolean;
+    },
+    onBatch?: (batch: StreamResolutionResult) => void
+  ): Promise<StreamResolutionResult & { scraperResults?: NuvioScraperRunResult[] }> {
     if (!params.tmdbId || params.isArchiveItem || !storageService.isProviderToggleEnabled('nuvio')) {
       return { sources: [], subtitles: [] };
     }
@@ -384,6 +389,8 @@ export const nuvioService = {
 
       const disabledIdsParam =
         disabled.size > 0 ? `&disabledIds=${encodeURIComponent(Array.from(disabled).join(','))}` : '';
+      const titleParam = params.title ? `&title=${encodeURIComponent(params.title)}` : '';
+      const yearParam = params.releaseYear ? `&year=${params.releaseYear}` : '';
 
       const matchesNuvioEpisode = (src: StreamSource): boolean => {
         if (params.mediaType !== 'tv' || !params.seasonNumber || !params.episodeNumber) return true;
@@ -397,12 +404,15 @@ export const nuvioService = {
         return true;
       };
 
+      const timerFn = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+      const clearTimerFn = typeof window !== 'undefined' ? window.clearTimeout : clearTimeout;
+
       await Promise.allSettled(
         manifestUrls.map(async (repoUrl, repoIdx) => {
           const controller = new AbortController();
-          const timeout = window.setTimeout(() => controller.abort(), 16000);
+          const timeout = timerFn(() => controller.abort(), 38000);
           try {
-            const endpoint = `/api/nuvio/streams?tmdbId=${params.tmdbId}&mediaType=${params.mediaType}&season=${season}&episode=${episode}&manifestUrl=${encodeURIComponent(repoUrl)}${disabledIdsParam}`;
+            const endpoint = `/api/nuvio/streams?tmdbId=${params.tmdbId}&mediaType=${params.mediaType}&season=${season}&episode=${episode}&manifestUrl=${encodeURIComponent(repoUrl)}${disabledIdsParam}${titleParam}${yearParam}`;
             const res = await fetch(endpoint, { signal: controller.signal });
             if (!res.ok) return;
 
@@ -411,6 +421,9 @@ export const nuvioService = {
               subtitles?: SubtitleTrack[];
               scraperResults?: NuvioScraperRunResult[];
             };
+
+            const batchSources: StreamSource[] = [];
+            const batchSubtitles: SubtitleTrack[] = [];
 
             for (const src of data.sources || []) {
               if (!matchesNuvioEpisode(src)) continue;
@@ -425,7 +438,9 @@ export const nuvioService = {
                   safeId = `${safeId}-${seenSourceIds.size}`;
                 }
                 seenSourceIds.add(safeId);
-                allSources.push({ ...src, id: safeId });
+                const cleanSrc = { ...src, id: safeId };
+                allSources.push(cleanSrc);
+                batchSources.push(cleanSrc);
               }
             }
             for (const sub of data.subtitles || []) {
@@ -437,15 +452,21 @@ export const nuvioService = {
                 safeSubId = `${safeSubId}-${seenSubIds.size}`;
               }
               seenSubIds.add(safeSubId);
-              allSubtitles.push({ ...sub, id: safeSubId });
+              const cleanSub = { ...sub, id: safeSubId };
+              allSubtitles.push(cleanSub);
+              batchSubtitles.push(cleanSub);
             }
             for (const sr of data.scraperResults || []) {
               allScraperResults.push(sr);
             }
+
+            if ((batchSources.length > 0 || batchSubtitles.length > 0) && onBatch) {
+              onBatch({ sources: batchSources, subtitles: batchSubtitles });
+            }
           } catch {
             // Skip unreachable Nuvio repo
           } finally {
-            window.clearTimeout(timeout);
+            clearTimerFn(timeout);
           }
         })
       );
@@ -490,7 +511,8 @@ export const nuvioService = {
       kind: 'stremio' | 'nuvio' | 'cloudstream' | 'core';
       url: string;
       name?: string;
-    }>
+    }>,
+    onProgress?: (chunkResults: Record<string, { status: 'online' | 'degraded' | 'offline'; latency: number; detail?: string }>) => void
   ): Promise<{
     results: Record<string, { status: 'online' | 'degraded' | 'offline'; latency: number; detail?: string }>;
     summary: { total: number; online: number; degraded: number; offline: number };
@@ -503,33 +525,76 @@ export const nuvioService = {
         checkedAt: Date.now(),
       };
     }
-    const controller = new AbortController();
-    const timer = window.setTimeout(() => controller.abort(), 30000);
-    try {
-      const res = await fetch('/api/providers/health', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ targets }),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        throw new Error(`Provider health check returned HTTP ${res.status}`);
+
+    const CHUNK_SIZE = 18;
+    const allResults: Record<string, { status: 'online' | 'degraded' | 'offline'; latency: number; detail?: string }> = {};
+
+    for (let i = 0; i < targets.length; i += CHUNK_SIZE) {
+      const chunk = targets.slice(i, i + CHUNK_SIZE);
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 45000);
+
+      try {
+        const res = await fetch('/api/providers/health', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targets: chunk }),
+          signal: controller.signal,
+        });
+
+        if (res.ok) {
+          const data = (await res.json()) as {
+            results?: Record<
+              string,
+              { status: 'online' | 'degraded' | 'offline'; latency: number; detail?: string }
+            >;
+          };
+          const chunkMap = data.results || {};
+          for (const [k, v] of Object.entries(chunkMap)) {
+            allResults[k] = v;
+          }
+          if (onProgress) {
+            onProgress(chunkMap);
+          }
+        } else {
+          for (const item of chunk) {
+            const fail = { status: 'offline' as const, latency: 0, detail: `HTTP ${res.status}` };
+            allResults[item.key] = fail;
+          }
+          if (onProgress) {
+            const fallbackMap: Record<string, { status: 'offline'; latency: number; detail: string }> = {};
+            for (const item of chunk) {
+              fallbackMap[item.key] = { status: 'offline', latency: 0, detail: `HTTP ${res.status}` };
+            }
+            onProgress(fallbackMap);
+          }
+        }
+      } catch (err) {
+        const isTimeout = err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
+        const detail = isTimeout ? 'Request timeout' : 'Unreachable';
+        const chunkFails: Record<string, { status: 'offline'; latency: number; detail: string }> = {};
+        for (const item of chunk) {
+          const fail = { status: 'offline' as const, latency: 0, detail };
+          allResults[item.key] = fail;
+          chunkFails[item.key] = fail;
+        }
+        if (onProgress) {
+          onProgress(chunkFails);
+        }
+      } finally {
+        window.clearTimeout(timer);
       }
-      const data = (await res.json()) as {
-        results?: Record<
-          string,
-          { status: 'online' | 'degraded' | 'offline'; latency: number; detail?: string }
-        >;
-        summary?: { total: number; online: number; degraded: number; offline: number };
-        checkedAt?: number;
-      };
-      return {
-        results: data.results || {},
-        summary: data.summary || { total: 0, online: 0, degraded: 0, offline: 0 },
-        checkedAt: data.checkedAt || Date.now(),
-      };
-    } finally {
-      window.clearTimeout(timer);
     }
+
+    const values = Object.values(allResults);
+    const online = values.filter((v) => v.status === 'online').length;
+    const degraded = values.filter((v) => v.status === 'degraded').length;
+    const offline = values.filter((v) => v.status === 'offline').length;
+
+    return {
+      results: allResults,
+      summary: { total: values.length, online, degraded, offline },
+      checkedAt: Date.now(),
+    };
   },
 };

@@ -1,4 +1,4 @@
-import { LiveChannel } from '../types/media';
+import { LiveChannel, StremioAddonConfig } from '../types/media';
 
 export interface LiveTvAddonSource {
   id: string;
@@ -109,7 +109,7 @@ export const CURATED_INDIAN_SPORTS_CHANNELS: LiveChannel[] = [
   },
 ];
 
-async function fetchWithTimeout(url: string, timeoutMs = 5000): Promise<Response> {
+async function fetchWithTimeout(url: string, timeoutMs = 9000): Promise<Response> {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -124,7 +124,7 @@ export async function resolveStremioLiveStreamUrl(
 ): Promise<string | null> {
   if (!proxiedStreamJsonUrl.includes('/stream/')) return proxiedStreamJsonUrl;
   const controller = new AbortController();
-  const timer = window.setTimeout(() => controller.abort(), 5000);
+  const timer = window.setTimeout(() => controller.abort(), 8000);
   try {
     const res = await fetch(proxiedStreamJsonUrl, { signal: controller.signal });
     if (!res.ok) return null;
@@ -144,23 +144,50 @@ export async function resolveStremioLiveStreamUrl(
 export const liveTvAddonService = {
   resolveStremioLiveStreamUrl,
 
-  async fetchAllAddonChannels(): Promise<LiveChannel[]> {
+  async fetchAllAddonChannels(
+    installedAddons?: StremioAddonConfig[]
+  ): Promise<{ channels: LiveChannel[]; errors: Record<string, string> }> {
     const allChannels: LiveChannel[] = [...CURATED_INDIAN_SPORTS_CHANNELS];
+    const errors: Record<string, string> = {};
     const proxyBase = '/api/proxy?url=';
 
+    const sources: LiveTvAddonSource[] = [...VERIFIED_LIVE_TV_ADDONS];
+    if (Array.isArray(installedAddons)) {
+      for (const addon of installedAddons) {
+        if (!addon.enabled || !addon.manifestUrl) continue;
+        if (!sources.some((s) => s.manifestUrl === addon.manifestUrl || s.id === addon.id)) {
+          sources.push({
+            id: addon.id,
+            name: addon.name,
+            manifestUrl: addon.manifestUrl,
+            category: 'Add-on TV',
+          });
+        }
+      }
+    }
+
+    const seenCompositeKeys = new Set<string>();
+    for (const c of CURATED_INDIAN_SPORTS_CHANNELS) {
+      seenCompositeKeys.add(`${c.name.toLowerCase().trim()}::${c.streamUrl}`);
+    }
+
     await Promise.allSettled(
-      VERIFIED_LIVE_TV_ADDONS.map(async (addon) => {
+      sources.map(async (addon) => {
         try {
           const res = await fetchWithTimeout(
             proxyBase + encodeURIComponent(addon.manifestUrl),
-            5000
+            9000
           );
-          if (!res.ok) return;
+          if (!res.ok) {
+            errors[addon.id] = `${addon.name}: HTTP ${res.status}`;
+            return;
+          }
           const manifest = (await res.json()) as {
             catalogs?: Array<{ id: string; type: string; name: string }>;
           };
-          if (!Array.isArray(manifest.catalogs)) return;
+          if (!Array.isArray(manifest.catalogs) || manifest.catalogs.length === 0) return;
 
+          // Look for catalogs that match live TV / sports / channels or fallback to catalog[0] if addon has TV keywords
           const catalog =
             manifest.catalogs.find(
               (c) =>
@@ -168,10 +195,11 @@ export const liveTvAddonService = {
                 c.type === 'channel' ||
                 c.type === 'sports' ||
                 c.type === 'live' ||
-                c.id.includes('tv') ||
-                c.id.includes('sport') ||
-                c.id.includes('channel')
-            ) || manifest.catalogs[0];
+                (c.id && (c.id.includes('tv') || c.id.includes('sport') || c.id.includes('channel')))
+            ) ||
+            (addon.name.toLowerCase().includes('tv') || addon.category.toLowerCase().includes('tv')
+              ? manifest.catalogs[0]
+              : null);
 
           if (!catalog) return;
 
@@ -180,9 +208,12 @@ export const liveTvAddonService = {
 
           const catRes = await fetchWithTimeout(
             proxyBase + encodeURIComponent(catalogUrl),
-            5000
+            9000
           );
-          if (!catRes.ok) return;
+          if (!catRes.ok) {
+            errors[addon.id] = `${addon.name} catalog: HTTP ${catRes.status}`;
+            return;
+          }
           const catJson = (await catRes.json()) as {
             metas?: Array<{
               id: string;
@@ -196,26 +227,36 @@ export const liveTvAddonService = {
           if (!Array.isArray(catJson.metas)) return;
 
           catJson.metas.forEach((meta, idx) => {
-            if (!meta.id || !meta.name) return;
-            const catType = catalog.type || 'tv';
-            const streamUrl = `${baseUrl}/stream/${catType}/${encodeURIComponent(meta.id)}.json`;
-            allChannels.push({
-              id: `addon-${addon.id}-${meta.id}-${idx}`,
-              name: meta.name.trim(),
-              group: meta.genres?.[0] || addon.category,
-              logo: meta.logo || meta.poster,
-              streamUrl: proxyBase + encodeURIComponent(streamUrl),
-              playlistId: addon.id,
-              playlistName: addon.name,
-              isLive: true,
-            });
+            try {
+              if (!meta || !meta.id || !meta.name) return;
+              const catType = catalog.type || 'tv';
+              const streamUrl = `${baseUrl}/stream/${catType}/${encodeURIComponent(meta.id)}.json`;
+              const proxiedStreamUrl = proxyBase + encodeURIComponent(streamUrl);
+              const compositeKey = `${String(meta.name).toLowerCase().trim()}::${proxiedStreamUrl}`;
+
+              if (seenCompositeKeys.has(compositeKey)) return;
+              seenCompositeKeys.add(compositeKey);
+
+              allChannels.push({
+                id: `addon-${addon.id}-${meta.id}-${idx}`,
+                name: String(meta.name).trim(),
+                group: meta.genres?.[0] || addon.category,
+                logo: meta.logo || meta.poster,
+                streamUrl: proxiedStreamUrl,
+                playlistId: addon.id,
+                playlistName: addon.name,
+                isLive: true,
+              });
+            } catch {
+              // Skip malformed catalog entry without failing remaining items
+            }
           });
-        } catch {
-          // Ignore individual addon failure
+        } catch (err) {
+          errors[addon.id] = err instanceof Error ? `${addon.name}: ${err.message}` : `${addon.name}: failed to load`;
         }
       })
     );
 
-    return allChannels;
+    return { channels: allChannels, errors };
   },
 };

@@ -167,6 +167,20 @@ input[type="range"].cinema-range:hover::-webkit-slider-thumb {
   animation-play-state: paused;
 }
 
+@keyframes ks-spin-arc {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+.ks-spin-arc {
+  animation: ks-spin-arc 0.85s linear infinite;
+  will-change: transform;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .liquid-blob-a,
   .liquid-blob-b,

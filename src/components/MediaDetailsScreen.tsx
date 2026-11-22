@@ -13,6 +13,7 @@ import {
   Share2,
   User,
 } from 'lucide-react';
+import { bengaliSerialService, BengaliEpisodeItem } from '../services/bengaliSerialService';
 import { dejavuApiService } from '../services/dejavuApiService';
 import { streamProviderService } from '../services/streamProviderService';
 import { getTmdbImageUrl, tmdbService } from '../services/tmdbService';
@@ -137,6 +138,40 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
               ]
             : undefined,
         numberOfSeasons: currentSeed.mediaType === 'tv' ? 1 : undefined,
+      });
+      setSelectedSeason(1);
+      setLoading(false);
+      return;
+    }
+
+    if (currentSeed?.bengaliSerialSlug || (mediaId >= 895000 && mediaId <= 899999)) {
+      setDetails({
+        ...currentSeed!,
+        id: mediaId,
+        mediaType: 'tv',
+        title: currentSeed?.title || 'Zee Bangla Serial',
+        overview: currentSeed?.overview || 'Daily Bengali serial streaming.',
+        posterPath: currentSeed?.posterPath ?? null,
+        backdropPath: currentSeed?.backdropPath ?? null,
+        releaseDate: currentSeed?.releaseDate || '',
+        voteAverage: currentSeed?.voteAverage || 8.4,
+        genreIds: currentSeed?.genreIds || [18, 10751],
+        runtime: 22,
+        genres: currentSeed?.title?.toLowerCase().includes('gopal')
+          ? [{ id: 16, name: 'Animation' }, { id: 35, name: 'Comedy' }]
+          : [{ id: 18, name: 'Drama' }, { id: 10751, name: 'Family' }],
+        cast: [],
+        similar: [],
+        seasons: [
+          {
+            id: 1,
+            seasonNumber: 1,
+            name: 'Daily & Full Episodes',
+            episodeCount: 18,
+            posterPath: null,
+          },
+        ],
+        numberOfSeasons: 1,
       });
       setSelectedSeason(1);
       setLoading(false);
@@ -271,6 +306,24 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
     let active = true;
     const loadSeason = async () => {
       setLoadingSeason(true);
+      const currentTitle = seedItemRef.current?.title || details?.title || '';
+      const isBengali =
+        Boolean(seedItemRef.current?.bengaliSerialSlug || details?.bengaliSerialSlug) ||
+        bengaliSerialService.isBengaliSerialOrCartoon({
+          title: currentTitle,
+          originalLanguage: seedItemRef.current?.originalLanguage || details?.originalLanguage,
+          bengaliSerialSlug: seedItemRef.current?.bengaliSerialSlug || details?.bengaliSerialSlug,
+        });
+
+      if (isBengali && currentTitle) {
+        const bengaliSeason = await bengaliSerialService.getEpisodes(currentTitle, selectedSeason);
+        if (active && bengaliSeason.episodes.length > 0) {
+          setSeasonDetails(bengaliSeason);
+          setLoadingSeason(false);
+          return;
+        }
+      }
+
       const season = await tmdbService.getSeasonDetails(mediaId, selectedSeason);
       if (active) {
         setSeasonDetails(season);
@@ -316,6 +369,7 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
 
   const handlePlayEpisode = (episode: Episode) => {
     if (!details) return;
+    const bEp = episode as BengaliEpisodeItem;
     const epProgress = continueWatching.find(
       (p) =>
         p.mediaId === details.id &&
@@ -331,7 +385,7 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
       posterPath: details.posterPath,
       backdropPath: details.backdropPath,
       fallbackPoster: details.fallbackPoster,
-      fallbackBackdrop: details.fallbackBackdrop,
+      fallbackBackdrop: bEp.fallbackStill || details.fallbackBackdrop,
       imdbId: details.imdbId,
       dejavuId: details.dejavuId || seedItem?.dejavuId,
       archiveIdentifier: details.archiveIdentifier || seedItem?.archiveIdentifier,
@@ -342,6 +396,8 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
       episodeNumber: episode.episodeNumber,
       episodeTitle: episode.name,
       initialTime: epProgress?.currentTime || 0,
+      bengaliSerialSlug: details.bengaliSerialSlug || seedItem?.bengaliSerialSlug,
+      preferredVideoId: bEp.videoId,
     });
   };
 
@@ -369,6 +425,7 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
           releaseYear: details.releaseDate ? parseInt(details.releaseDate.slice(0, 4), 10) || undefined : undefined,
           seasonNumber: selectedSeason,
           episodeNumber: 1,
+          bengaliSerialSlug: details.bengaliSerialSlug || seedItem?.bengaliSerialSlug,
         });
       }
       return;
@@ -988,7 +1045,11 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
                           <div className="relative shrink-0 w-32 sm:w-44 aspect-video rounded-xl overflow-hidden bg-[#111520] border border-white/[0.08]">
                             <MediaPosterImage
                               path={ep.stillPath}
-                              fallbackSrc={details.fallbackBackdrop || details.fallbackPoster}
+                              fallbackSrc={
+                                (ep as BengaliEpisodeItem).fallbackStill ||
+                                details.fallbackBackdrop ||
+                                details.fallbackPoster
+                              }
                               size="w500"
                               alt={`Episode ${ep.episodeNumber}: ${ep.name}`}
                               titleForFallback={`E${ep.episodeNumber}`}

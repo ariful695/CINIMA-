@@ -3,7 +3,9 @@ import {
   Bookmark,
   Clapperboard,
   Download,
+  HardDriveDownload,
   Home,
+  Layers,
   PlayCircle,
   Search,
   Settings,
@@ -51,16 +53,19 @@ const AppShell: React.FC = () => {
     selectedMedia,
     playerSession,
     themeColor,
+    offlineDownloads,
   } = useAppState();
 
   const accent = THEME_ACCENTS[themeColor || 'red'];
 
   const [navVisible, setNavVisible] = React.useState(true);
+  const [scrolledDown, setScrolledDown] = React.useState(false);
   const lastScrollYRef = React.useRef(0);
 
   React.useEffect(() => {
     const handleScroll = () => {
       const currentScrollY = window.scrollY;
+      setScrolledDown(currentScrollY > 24);
       if (currentScrollY > lastScrollYRef.current && currentScrollY > 40) {
         setNavVisible(false);
       } else if (currentScrollY < lastScrollYRef.current) {
@@ -182,6 +187,40 @@ const AppShell: React.FC = () => {
             <motion.button
               whileTap={{ scale: 0.96 }}
               type="button"
+              onClick={() => openLibrarySection('downloads')}
+              className={`relative w-full min-h-[44px] px-3.5 py-2.5 rounded-xl text-sm font-medium flex items-center justify-between gap-2 transition-colors whitespace-nowrap shrink-0 ${
+                activeTab === 'library' && librarySubTab === 'downloads'
+                  ? 'text-white'
+                  : 'text-slate-400 hover:text-slate-100 hover:bg-white/[0.04]'
+              }`}
+            >
+              {activeTab === 'library' && librarySubTab === 'downloads' && (
+                <motion.span
+                  layoutId="desktop-nav-liquid"
+                  transition={LIQUID_SPRING}
+                  className="absolute inset-0 rounded-xl bg-white/[0.10] backdrop-blur-xl border border-white/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_8px_24px_rgba(0,0,0,0.3)]"
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-3">
+                <HardDriveDownload
+                  className={`h-5 w-5 shrink-0 ${
+                    activeTab === 'library' && librarySubTab === 'downloads'
+                      ? 'text-emerald-400'
+                      : 'text-slate-400'
+                  }`}
+                />
+                <span>Downloads</span>
+              </span>
+              {offlineDownloads.length > 0 && (
+                <span className="relative z-10 text-xs font-mono-tabular text-slate-300">
+                  {offlineDownloads.length}
+                </span>
+              )}
+            </motion.button>
+
+            <motion.button
+              whileTap={{ scale: 0.96 }}
+              type="button"
               onClick={() => openLibrarySection('extensions')}
               className={`relative w-full min-h-[44px] px-3.5 py-2.5 rounded-xl text-sm font-medium flex items-center gap-3 transition-colors whitespace-nowrap shrink-0 ${
                 activeTab === 'library' && librarySubTab === 'extensions'
@@ -196,7 +235,7 @@ const AppShell: React.FC = () => {
                   className="absolute inset-0 rounded-xl bg-white/[0.10] backdrop-blur-xl border border-white/20 shadow-[inset_0_1px_0_rgba(255,255,255,0.22),0_8px_24px_rgba(0,0,0,0.3)]"
                 />
               )}
-              <Download
+              <Layers
                 className={`relative z-10 h-5 w-5 shrink-0 ${
                   activeTab === 'library' && librarySubTab === 'extensions'
                     ? 'text-blue-400'
@@ -209,34 +248,64 @@ const AppShell: React.FC = () => {
         </div>
       </aside>
 
-      {/* Mobile Compact Glass Header */}
-      <header className="lg:hidden sticky top-0 z-30 h-[52px] px-4 bg-[#07090E]/90 backdrop-blur-md border-b border-white/[0.09] flex items-center justify-between">
+      {/* Mobile Compact Glass Header (transparent over Home hero at top, frosted on scroll/other tabs) */}
+      <header
+        className={`lg:hidden ${
+          activeTab === 'home' ? 'fixed top-0 inset-x-0' : 'sticky top-0'
+        } z-30 h-[56px] px-4 flex items-center justify-between transition-colors duration-200 ${
+          activeTab === 'home' && !scrolledDown
+            ? 'bg-gradient-to-b from-black/75 via-black/35 to-transparent border-b border-transparent'
+            : 'bg-[#07090E]/85 backdrop-blur-md border-b border-white/[0.09]'
+        }`}
+      >
         <button
           type="button"
           onClick={() => setActiveTab('home')}
-          className="font-display text-lg font-extrabold tracking-widest text-white whitespace-nowrap shrink-0 uppercase"
+          className="font-display text-base sm:text-lg font-extrabold tracking-[0.22em] text-white whitespace-nowrap shrink-0 uppercase drop-shadow-sm"
         >
           EUTHOPIAR
         </button>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2.5">
           <button
             type="button"
             onClick={() => setActiveTab('search')}
             aria-label="Search catalog"
-            className="h-9 w-9 flex items-center justify-center rounded-full bg-white/[0.06] border border-white/10 text-slate-200 hover:text-white"
+            className="h-10 w-10 flex items-center justify-center rounded-full bg-black/35 backdrop-blur-md border border-white/25 text-white hover:bg-white/15 transition-colors"
           >
             <Search className="h-4.5 w-4.5" />
           </button>
           <button
             type="button"
+            onClick={() => openLibrarySection('downloads')}
+            aria-label="Offline Downloads"
+            className="relative h-10 w-10 flex items-center justify-center rounded-full bg-black/35 backdrop-blur-md border border-white/25 text-white hover:bg-white/15 transition-colors"
+          >
+            <Download className="h-4.5 w-4.5" />
+            {offlineDownloads.length > 0 && (
+              <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-white shadow-[0_0_6px_rgba(255,255,255,0.9)]" />
+            )}
+          </button>
+          <button
+            type="button"
             onClick={() => openLibrarySection('settings')}
             aria-label="User Profile"
-            className="h-9 w-9 rounded-full overflow-hidden border-2 border-white/20 bg-emerald-100/20 flex items-center justify-center shadow-md active:scale-95 transition-transform"
+            className="h-10 w-10 rounded-full overflow-hidden border-2 border-white/35 bg-gradient-to-br from-indigo-300 via-sky-200 to-purple-300 flex items-center justify-center shadow-md active:scale-95 transition-transform"
           >
-            <div className="h-full w-full bg-gradient-to-tr from-amber-400 to-rose-400 flex items-center justify-center text-slate-950 font-bold text-xs">
-              👤
-            </div>
+            <svg
+              viewBox="0 0 36 36"
+              fill="none"
+              aria-hidden="true"
+              className="h-full w-full"
+            >
+              <circle cx="18" cy="18" r="18" fill="#C7D2FE" />
+              <circle cx="18" cy="14" r="6" fill="#7C3AED" opacity="0.8" />
+              <path
+                d="M7 33C8.8 26.8 13 23.5 18 23.5C23 23.5 27.2 26.8 29 33"
+                fill="#4F46E5"
+                opacity="0.85"
+              />
+            </svg>
           </button>
         </div>
       </header>
@@ -254,8 +323,10 @@ const AppShell: React.FC = () => {
           {activeTab === 'series' && <CatalogGridScreen mediaType="tv" />}
           {activeTab === 'live' && <LiveTvScreen />}
           {activeTab === 'search' && <SearchScreen />}
-          {activeTab === 'library' && librarySubTab === 'settings' && <SettingsScreen />}
-          {activeTab === 'library' && librarySubTab === 'mylist' && <SettingsScreen />}
+          {activeTab === 'library' &&
+            (librarySubTab === 'settings' ||
+              librarySubTab === 'mylist' ||
+              librarySubTab === 'downloads') && <SettingsScreen />}
           {activeTab === 'library' && librarySubTab === 'extensions' && <ExtensionsScreen />}
         </motion.div>
       </main>
@@ -354,12 +425,74 @@ const AppShell: React.FC = () => {
   );
 };
 
+interface AppErrorBoundaryState {
+  hasError: boolean;
+  errorMessage: string;
+}
+
+class AppErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  AppErrorBoundaryState
+> {
+  constructor(props: { children: React.ReactNode }) {
+    super(props);
+    this.state = { hasError: false, errorMessage: '' };
+  }
+
+  static getDerivedStateFromError(error: Error): AppErrorBoundaryState {
+    return {
+      hasError: true,
+      errorMessage: error?.message || 'Unexpected rendering error occurred.',
+    };
+  }
+
+  componentDidCatch(error: Error) {
+    console.error('[EUTHOPIAR] Recovered UI error:', error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="min-h-screen bg-[#07090E] text-slate-100 flex items-center justify-center p-6">
+          <div className="max-w-md w-full rounded-2xl bg-[#101420] border border-white/15 p-6 text-center space-y-4 shadow-2xl">
+            <h1 className="font-display text-xl font-bold text-white">
+              Display Interrupted
+            </h1>
+            <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+              {this.state.errorMessage}
+            </p>
+            <div className="flex items-center justify-center gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() => this.setState({ hasError: false, errorMessage: '' })}
+                className="min-h-[42px] px-5 py-2 rounded-xl bg-[#E50914] hover:bg-red-500 text-xs font-bold text-white transition-colors"
+              >
+                Continue
+              </button>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="min-h-[42px] px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-semibold text-slate-200 transition-colors"
+              >
+                Reload
+              </button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
 export default function App() {
   return (
-    <MotionConfig reducedMotion="user">
-      <AppProvider>
-        <AppShell />
-      </AppProvider>
-    </MotionConfig>
+    <AppErrorBoundary>
+      <MotionConfig reducedMotion="user">
+        <AppProvider>
+          <AppShell />
+        </AppProvider>
+      </MotionConfig>
+    </AppErrorBoundary>
   );
 }

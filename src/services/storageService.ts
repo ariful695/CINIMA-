@@ -34,6 +34,7 @@ export const DEFAULT_PROVIDER_TOGGLES: ProviderToggles = {
   dejavu: true,
   cinemeta: true,
   opensubtitles: true,
+  bengali_serials: true,
 };
 
 export const DEFAULT_JSON_ENDPOINTS: JsonStreamEndpoint[] = [];
@@ -79,24 +80,6 @@ export const DEFAULT_VERIFIED_STREAM_ADDONS: StremioAddonConfig[] = [
       'https://hdhub.thevolecitor.qzz.io/eyJ0b3Jib3giOiJ1bnNldCIsInF1YWxpdGllcyI6IjIxNjBwLDEwODBwLDcyMHAiLCJzb3J0IjoiZGVzYyJ9',
     enabled: true,
     description: 'Direct & multi-audio Hindi/English streams for movies and series',
-    version: '1.0.0',
-  },
-  {
-    id: 'stremio-nuvio-streams',
-    name: 'Nuvio Streams (Direct HTTP)',
-    manifestUrl: 'https://nuviostreams.hayd.uk/manifest.json',
-    baseUrl: 'https://nuviostreams.hayd.uk',
-    enabled: true,
-    description: 'Direct HTTP & multi-language streams for movies and TV shows',
-    version: '1.0.0',
-  },
-  {
-    id: 'stremio-webstreamr-mbg',
-    name: 'WebStreamrMBG (Direct HTTP)',
-    manifestUrl: 'https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/manifest.json',
-    baseUrl: 'https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club',
-    enabled: true,
-    description: 'Direct HTTPS multi-language web streams for movies and series',
     version: '1.0.0',
   },
   {
@@ -229,7 +212,13 @@ export const storageService = {
       null
     );
     if (stored && Array.isArray(stored)) {
-      return stored.filter((e) => !e.urlTemplate.includes('test-streams.mux.dev'));
+      return stored.filter(
+        (e) =>
+          Boolean(e) &&
+          typeof e === 'object' &&
+          typeof e.urlTemplate === 'string' &&
+          !e.urlTemplate.includes('test-streams.mux.dev')
+      );
     }
     return window.__KINO_API_CONFIG__?.defaultStreamEndpoints || DEFAULT_JSON_ENDPOINTS;
   },
@@ -342,46 +331,43 @@ export const storageService = {
       null
     );
     const defaultFlagKey = 'kinostream_torrentio_default_v1';
-    const workingPackFlagKey = 'kinostream_stremio_working_pack_v2';
+    const workingPackFlagKey = 'kinostream_stremio_working_pack_v3';
     const normUrl = (u: string) =>
       (u || '').trim().replace(/^stremio:\/\//i, 'https://').replace(/\/+$/, '').toLowerCase();
+    const deadAddonHosts = [
+      'notorrent2.workers.dev',
+      'nuviostreams.hayd.uk',
+      'webstreamr.hayd.uk',
+      'webstreamrmbg.baby-beamup.club',
+      'stremio-pipe.vercel.app',
+      'v2.stravo.site',
+      'nuvio.elfhosted.com',
+      'comet.elfhosted.com',
+    ];
 
     if (stored && Array.isArray(stored)) {
       let changed = false;
       const dirById = new Map(STREMIO_ADDONS_NET_DIRECTORY.map((d) => [d.id, d]));
 
-      // Remove non-Stremio CloudStream repo.json entries from Stremio list
+      // Remove non-Stremio CloudStream repo.json entries and confirmed dead endpoints from Stremio list
       let nextList = stored
-        .filter((addon) => {
-          const m = (addon.manifestUrl || '').toLowerCase();
+        .filter((addon): addon is StremioAddonConfig => {
+          if (!addon || typeof addon !== 'object') {
+            changed = true;
+            return false;
+          }
+          const m = typeof addon.manifestUrl === 'string' ? addon.manifestUrl.toLowerCase() : '';
           if (m.endsWith('/repo.json') || m.endsWith('/cs.json')) {
+            changed = true;
+            return false;
+          }
+          if (deadAddonHosts.some((h) => m.includes(h))) {
             changed = true;
             return false;
           }
           return true;
         })
         .map((addon) => {
-          const lowerManifest = (addon.manifestUrl || '').toLowerCase();
-          if (lowerManifest.includes('notorrent2.workers.dev')) {
-            changed = true;
-            return {
-              ...addon,
-              id: 'stremio-nuvio-streams',
-              name: 'Nuvio Streams (Direct HTTP)',
-              manifestUrl: 'https://nuviostreams.hayd.uk/manifest.json',
-              baseUrl: 'https://nuviostreams.hayd.uk',
-            };
-          }
-          if (lowerManifest.includes('webstreamr.hayd.uk')) {
-            changed = true;
-            return {
-              ...addon,
-              id: 'stremio-webstreamr-mbg',
-              name: 'WebStreamrMBG (Direct HTTP)',
-              manifestUrl: 'https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/manifest.json',
-              baseUrl: 'https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club',
-            };
-          }
           const dirMatch = dirById.get(addon.id);
           if (dirMatch && dirMatch.manifestUrl && addon.manifestUrl !== dirMatch.manifestUrl) {
             changed = true;
@@ -397,7 +383,9 @@ export const storageService = {
 
       if (localStorage.getItem(defaultFlagKey) !== '1') {
         const hasTorrentio = nextList.some(
-          (a) => a.id === DEFAULT_TORRENTIO_ADDON.id || a.baseUrl.includes('torrentio.strem.fun')
+          (a) =>
+            a.id === DEFAULT_TORRENTIO_ADDON.id ||
+            (typeof a.baseUrl === 'string' && a.baseUrl.includes('torrentio.strem.fun'))
         );
         localStorage.setItem(defaultFlagKey, '1');
         if (!hasTorrentio) {

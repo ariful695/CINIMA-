@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, ChevronDown, Search, User, X } from 'lucide-react';
 import { TMDB_GENRES } from '../data/curatedCatalog';
 import { archiveMovieService } from '../services/archiveMovieService';
+import { bengaliSerialService } from '../services/bengaliSerialService';
 import { dejavuApiService } from '../services/dejavuApiService';
 import { storageService } from '../services/storageService';
 import { getTmdbImageUrl, tmdbService } from '../services/tmdbService';
@@ -109,15 +110,16 @@ export const SearchScreen: React.FC = () => {
     let active = true;
     const runSearch = async () => {
       setLoading(true);
-      const [tmdbData, dejavuResults, archiveResults] = await Promise.all([
+      const [tmdbData, dejavuResults, archiveResults, bengaliResults] = await Promise.all([
         tmdbService.searchMulti(debouncedQuery),
         dejavuApiService.search(debouncedQuery),
         archiveMovieService.searchArchiveMovies(debouncedQuery),
+        bengaliSerialService.search(debouncedQuery),
       ]);
       if (!active) return;
 
       const mergedMap = new Map<string, MediaItem>();
-      for (const item of [...dejavuResults, ...tmdbData.moviesAndShows, ...archiveResults]) {
+      for (const item of [...bengaliResults, ...dejavuResults, ...tmdbData.moviesAndShows, ...archiveResults]) {
         const key = `${item.mediaType}-${item.title.toLowerCase().trim()}`;
         if (!mergedMap.has(key)) {
           mergedMap.set(key, item);

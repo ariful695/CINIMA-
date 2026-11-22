@@ -15,26 +15,6 @@ export const POPULAR_STREMIO_PRESETS: Array<{
   description: string;
 }> = [
   {
-    name: 'Nuvio Streams (Direct HTTP)',
-    manifestUrl: 'https://nuviostreams.hayd.uk/manifest.json',
-    description: 'Fast direct HTTP multi-language streams for movies & series',
-  },
-  {
-    name: 'WebStreamrMBG (Direct HTTP)',
-    manifestUrl: 'https://87d6a6ef6b58-webstreamrmbg.baby-beamup.club/manifest.json',
-    description: 'Direct HTTPS web streams with multi-language support',
-  },
-  {
-    name: 'MediaFusion (Multi-Audio & Streams)',
-    manifestUrl: 'https://mediafusion.elfhosted.com/manifest.json',
-    description: 'Universal regional, Hindi, Tamil, Telugu & English stream index',
-  },
-  {
-    name: 'Comet (Fast Search & Streams)',
-    manifestUrl: 'https://comet.elfhosted.com/manifest.json',
-    description: 'High-speed torrent and direct mirror search addon',
-  },
-  {
     name: 'Torrentio (Public Stream Addon)',
     manifestUrl: 'https://torrentio.strem.fun/manifest.json',
     description: 'Scrapes popular multi-resolution streams with multi-language audio & subs',
@@ -64,6 +44,21 @@ export const POPULAR_STREMIO_PRESETS: Array<{
     name: 'Peerflix (Streams & Torrents)',
     manifestUrl: 'https://peerflix.mov/manifest.json',
     description: 'Fast P2P and multi-language community movie & series streams',
+  },
+  {
+    name: 'Pipe Streams',
+    manifestUrl: 'https://pipe.boringways.workers.dev/manifest.json',
+    description: 'Fast workers-backed torrent stream index for movies & series',
+  },
+  {
+    name: 'IlCorsaroViola',
+    manifestUrl: 'https://icv.stremio-italia.eu/manifest.json',
+    description: 'Multi-resolution European & English stream index',
+  },
+  {
+    name: 'MediaFusion (Multi-Audio & Streams)',
+    manifestUrl: 'https://mediafusion.elfhosted.com/manifest.json',
+    description: 'Universal regional, Hindi, Tamil, Telugu & English stream index',
   },
 ];
 
@@ -259,42 +254,31 @@ function isStremioStreamRelevant(
   // Enforce title token overlap when stream carries an explicit movie filename, release year, or descriptive title
   if (params.title) {
     const expectedTokens = tokenizeForMatch(params.title);
-    const addonTokens = new Set(
-      tokenizeForMatch(params.title).length
-        ? [
-            'torrentio',
-            'meteor',
-            'torrentsdb',
-            'torrentclaw',
-            'peerflix',
-            'pipe',
-            'hdhub',
-            'notorrent',
-            'ilcorsaroviola',
-            'icv',
-            'knaben',
-            'truespec',
-            'verified',
-            'original',
-          ]
-        : []
-    );
+    const addonTokens = new Set([
+      'torrentio',
+      'meteor',
+      'torrentsdb',
+      'torrentclaw',
+      'peerflix',
+      'pipe',
+      'hdhub',
+      'notorrent',
+      'ilcorsaroviola',
+      'icv',
+      'knaben',
+      'truespec',
+      'verified',
+      'original',
+    ]);
     const candidateTokens = tokenizeForMatch(firstLine).filter((t) => !addonTokens.has(t));
-    if (
-      expectedTokens.length >= 1 &&
-      (hasExplicitFilenameOrYear ? candidateTokens.length >= 2 : candidateTokens.length >= 3)
-    ) {
+    if (expectedTokens.length >= 2 && candidateTokens.length >= 2) {
       const matchedCount = expectedTokens.filter((et) =>
         candidateTokens.some(
           (ct) => ct === et || (et.length >= 4 && ct.length >= 4 && (ct.includes(et) || et.includes(ct)))
         )
       ).length;
-      if (expectedTokens.length >= 2) {
-        const minNeeded = Math.ceil(expectedTokens.length * 0.5);
-        if (matchedCount < minNeeded) return false;
-      } else if (matchedCount === 0) {
-        return false;
-      }
+      const minNeeded = Math.max(1, Math.floor(expectedTokens.length * 0.35));
+      if (matchedCount < minNeeded) return false;
     }
   }
 
@@ -434,7 +418,10 @@ export const stremioAddonService = {
    * Resolves playable HTTP, HLS & BitTorrent P2P streams across all enabled Stremio Addons.
    * Splits multi-language streams into separate single-language entries.
    */
-  async resolveStreams(params: StremioResolveParams): Promise<StreamSource[]> {
+  async resolveStreams(
+    params: StremioResolveParams,
+    onBatch?: (batch: StreamSource[]) => void
+  ): Promise<StreamSource[]> {
     const toggles = storageService.getProviderToggles();
     const addons = storageService
       .getStremioAddons()
@@ -469,6 +456,21 @@ export const stremioAddonService = {
     let targetImdbId = params.imdbId;
     if (!targetImdbId && params.tmdbId) {
       targetImdbId = await tmdbService.getImdbId(params.tmdbId, params.mediaType);
+      if (!targetImdbId) {
+        try {
+          const yearQ = params.releaseYear ? `&year=${params.releaseYear}` : '';
+          const titleQ = params.title ? `&title=${encodeURIComponent(params.title)}` : '';
+          const res = await fetch(
+            `/api/resolve-imdb?tmdbId=${params.tmdbId}&mediaType=${params.mediaType}${titleQ}${yearQ}`
+          );
+          if (res.ok) {
+            const j = (await res.json()) as { imdbId?: string | null };
+            if (j?.imdbId) targetImdbId = j.imdbId;
+          }
+        } catch {
+          // Ignore server fallback failure
+        }
+      }
     }
 
     const baseId =
@@ -491,19 +493,22 @@ export const stremioAddonService = {
     const sources: StreamSource[] = [];
 
     const fetchAddonJson = async (endpointUrl: string): Promise<StremioStreamResponse | null> => {
+      const controller = new AbortController();
+      const timerFn = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+      const clearTimerFn = typeof window !== 'undefined' ? window.clearTimeout : clearTimeout;
+      const timeout = timerFn(() => controller.abort(), 7500);
       try {
-        const controller = new AbortController();
-        const timeout = window.setTimeout(() => controller.abort(), 12000);
         const res = await fetch(`/api/proxy?url=${encodeURIComponent(endpointUrl)}`, {
           signal: controller.signal,
         });
-        window.clearTimeout(timeout);
         if (!res.ok) return null;
         const text = await res.text();
         if (!text.trim().startsWith('{')) return null;
         return JSON.parse(text) as StremioStreamResponse;
       } catch {
         return null;
+      } finally {
+        clearTimerFn(timeout);
       }
     };
 
@@ -712,6 +717,9 @@ export const stremioAddonService = {
           }
 
           sources.push(...balanced);
+          if (balanced.length > 0 && onBatch) {
+            onBatch(balanced);
+          }
         } catch {
           // Skip addon on timeout or network block
         }
