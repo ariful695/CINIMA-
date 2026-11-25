@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <script>
+      (function () {
+        // Suppress harmless Vite HMR WebSocket errors in Cloud Run iframe environment (HMR is disabled by system policy)
+        var isHmrError = function (msg) {
+          if (!msg) return false;
+          var s = typeof msg === 'string' ? msg : (msg.message || msg.stack || String(msg));
+          return (
+            s.indexOf('WebSocket closed without opened') !== -1 ||
+            s.indexOf('SendBeforeConnectError') !== -1 ||
+            s.indexOf("reading 'send'") !== -1 ||
+            s.indexOf('/@vite/client') !== -1 ||
+            s.indexOf('@vite-plugin-pwa') !== -1
+          );
+        };
+        var origError = console.error;
+        console.error = function () {
+          for (var i = 0; i < arguments.length; i++) {
+            if (isHmrError(arguments[i])) return;
+          }
+          return origError.apply(console, arguments);
+        };
+        window.addEventListener(
+          'error',
+          function (e) {
+            if (isHmrError(e.message) || isHmrError(e.error)) {
+              e.preventDefault();
+              e.stopImmediatePropagation();
+              return true;
+            }
+          },
+          true
+        );
+        window.addEventListener(
+          'unhandledrejection',
+          function (e) {
+            if (isHmrError(e.reason)) {
+              e.preventDefault();
+              e.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+      })();
+    </script>
+    <meta name="theme-color" content="#07090e" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="EUTHOPIAR" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <title>EUTHOPIAR — Cinema, Series &amp; Live TV Aggregator</title>
+    <meta
+      name="description"
+      content="Unified Movie, TV Series, and Live TV streaming aggregator with TMDB metadata, Stremio add-ons, and adaptive HLS playback."
+    />
+    <meta property="og:title" content="EUTHOPIAR — Cinema, Series &amp; Live TV Aggregator" />
+    <meta
+      property="og:description"
+      content="Unified Movie, TV Series, and Live TV streaming aggregator with TMDB metadata, Stremio add-ons, and adaptive HLS playback."
+    />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Cinzel:wght@600;700;800;900&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@700;800;900&family=Outfit:wght@500;600;700;800&family=Playfair+Display:ital,wght@0,700;0,900;1,700&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      // Client-side API & Stream Endpoint Registry (No Backend Required)
+      window.__KINO_API_CONFIG__ = {
+        tmdbBaseUrl: 'https://api.themoviedb.org/3',
+        tmdbImageBase: 'https://image.tmdb.org/t/p',
+        defaultTmdbApiKey: '7ba2b8ccdcabf66f03d2c5ed45d4e2e6',
+        defaultStreamEndpoints: [],
+        dejavuApi: {
+          baseUrl: '',
+          routes: {
+            trendingMovies: '/trending-movies',
+            trendingTvShows: '/trending-tv-shows',
+            latestMovies: '/latest-movies',
+            latestTvShows: '/latest-tv-shows',
+            comingSoon: '/comming-soon',
+            search: '/search/{query}',
+            movieDetails: '/details/movie/{id}',
+            tvDetails: '/details/tv/{id}'
+          }
+        },
+        cricbuzzApi: {
+          baseUrl: 'https://cricbuzz-cricket.p.rapidapi.com',
+          rapidApiHost: 'cricbuzz-cricket.p.rapidapi.com',
+          rapidApiKey: '4850f9c854msh9e719931e8d07c8p12b529jsnbdba1c56c2bc',
+          routes: {
+            live: '/matches/v1/live',
+            upcoming: '/matches/v1/upcoming',
+            recent: '/matches/v1/recent'
+          }
+        },
+        sportsChannels: [
+          {
+            id: 'star-sports-2-telugu',
+            name: 'Star Sports 2 Telugu HD',
+            quality: 'HD',
+            streamUrl: 'https://real-vk.proxy.nellaiiptv.com/SDMEDIA/index.m3u8',
+            logo: 'https://lo1.in/ind/starsp2.png',
+            country: 'IN'
+          },
+          {
+            id: 'sony-sports-ten-3',
+            name: 'Sony Sports Ten 3 HD (Hindi)',
+            quality: 'FHD',
+            streamUrl: 'https://r2.amml.in/sony-ten-3-hd/live.m3u8',
+            logo: 'https://lo1.in/pk/so.png',
+            country: 'IN'
+          },
+          {
+            id: 'dd-sports-in',
+            name: 'DD Sports HD',
+            quality: 'FHD',
+            streamUrl: 'https://d3qs3d2rkhfqrt.cloudfront.net/out/v1/b17adfe543354fdd8d189b110617cddd/index.m3u8',
+            logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/d/d3/DD_Sports_2023_logo.svg/320px-DD_Sports_2023_logo.svg.png',
+            country: 'IN'
+          },
+          {
+            id: 'm-sports-pk',
+            name: 'M Sports HD',
+            quality: 'FHD',
+            streamUrl: 'https://cdn.rabta.stream/M-Sports/index.m3u8',
+            logo: 'https://msports.pk/wp-content/uploads/2026/02/m-sports-300.png',
+            country: 'PK'
+          }
+        ]
+      };
+    </script>
+    <script type="module" crossorigin src="/assets/index-B1LAcpBz.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-CCUaRXSX.css">
+  <link rel="manifest" href="/manifest.webmanifest"></head>
+  <body style="background-color: #07090e; color: #f1f5f9;" class="bg-[#0B0D12] text-slate-100 antialiased selection:bg-[#E50914] selection:text-white">
+    <div id="root">
+      <div style="min-height:100vh;display:flex;align-items:center;justify-content:center;background:#07090e;color:#e2e8f0;font-family:system-ui,sans-serif;">
+        <div style="text-align:center;">
+          <div style="font-size:20px;font-weight:800;letter-spacing:0.2em;">EUTHOPIAR</div>
+          <div style="margin-top:8px;font-size:12px;color:#94a3b8;">Loading streaming workspace...</div>
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

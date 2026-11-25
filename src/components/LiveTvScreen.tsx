@@ -2,8 +2,6 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
-  ChevronDown,
-  Globe,
   Heart,
   Radio,
   RefreshCw,
@@ -13,13 +11,55 @@ import {
   X,
 } from 'lucide-react';
 import { AnimatePresence, motion } from 'motion/react';
-import { getIptvRegions } from '../services/iptvOrgService';
 import { iptvParser } from '../services/iptvParser';
 import { useAppState } from '../state/AppContext';
 import { LiveChannel } from '../types/media';
 import { SportsEventsScreen } from './SportsEventsScreen';
 
 const PAGE_SIZE = 36;
+
+const CURATED_LIVE_CATEGORIES = [
+  'All',
+  'Sports',
+  'News',
+  'Entertainment',
+  'Movies',
+  'Kids',
+  'Favorites',
+] as const;
+
+function cleanChannelBaseName(rawName: string): string {
+  return (rawName || '')
+    .replace(/\[[^\]]*\]/g, ' ')
+    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\b(4k|uhd|fhd|hd|sd|1080p|720p|480p|360p|hevc|h\.?265|h\.?264|backup|feed|alt|mirror|server|live)\b/gi, ' ')
+    .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function channelMatchesCategory(ch: LiveChannel, category: string, favoriteIds: string[]): boolean {
+  if (category === 'All') return true;
+  if (category === 'Favorites') return favoriteIds.includes(ch.id);
+  const g = (ch.group || '').toLowerCase();
+  const n = (ch.name || '').toLowerCase();
+  const c = category.toLowerCase();
+  if (g === c) return true;
+  const hay = `${g} ${n}`;
+  if (c === 'sports') return /\b(sport|sports|cricket|football|soccer|ten|sony|star|espn|fox sports|bein|f1|racing|wwe|ufc|nba)\b/i.test(hay);
+  if (c === 'news') return /\b(news|cnn|bbc|al jazeera|sky news|ndtv|aaj tak|republic|wion|bloomberg|cnbc|msnbc|abp|zee news|france 24|dw)\b/i.test(hay);
+  if (c === 'entertainment') return /\b(entertain|drama|comedy|lifestyle|general|series|tv|colors|zeetv|sony|sab|star plus|mtv)\b/i.test(hay);
+  if (c === 'movies') return /\b(movie|movies|cinema|film|films|hbo|star gold|set max|zee cinema|pictures|thriller|action)\b/i.test(hay);
+  if (c === 'kids') return /\b(kid|kids|cartoon|anim|disney|nick|nickelodeon|pogo|cn|cartoon network|hungama|sonic|baby)\b/i.test(hay);
+  return g.includes(c);
+}
+
+interface GroupedChannelEntry {
+  key: string;
+  displayName: string;
+  primary: LiveChannel;
+  feeds: LiveChannel[];
+}
 
 const ChannelLogo: React.FC<{ channel: LiveChannel }> = ({ channel }) => {
   const [imgFailed, setImgFailed] = useState(false);
@@ -70,8 +110,6 @@ export const LiveTvScreen: React.FC = () => {
     openLibrarySection,
     favoriteChannelIds,
     toggleFavoriteChannel,
-    iptvRegion,
-    setIptvRegion,
     channelHealthMap,
     mergeChannelHealth,
   } = useAppState();
@@ -80,7 +118,7 @@ export const LiveTvScreen: React.FC = () => {
   const [sportsLoading, setSportsLoading] = useState(false);
   const [sportsRefreshTick, setSportsRefreshTick] = useState(0);
 
-  const [selectedGroup, setSelectedGroup] = useState<string>('All');
+  const [selectedGroup] = useState<string>('All');
   const [channelFilter, setChannelFilter] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -94,16 +132,10 @@ export const LiveTvScreen: React.FC = () => {
   const healthMapRef = useRef(channelHealthMap);
   healthMapRef.current = channelHealthMap;
 
-  const regions = useMemo(() => getIptvRegions(), []);
-
-  // Reset pagination when region or filters change
+  // Reset pagination when filters change
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
-  }, [selectedGroup, channelFilter, favoritesOnly, httpsOnly, verifiedOnly, iptvRegion]);
-
-  useEffect(() => {
-    setSelectedGroup('All');
-  }, [iptvRegion]);
+  }, [selectedGroup, channelFilter, favoritesOnly, httpsOnly, verifiedOnly]);
 
   const protocolFiltered = useMemo(() => {
     if (!httpsOnly) return liveChannels;
@@ -112,26 +144,11 @@ export const LiveTvScreen: React.FC = () => {
     );
   }, [liveChannels, httpsOnly]);
 
-  // Dynamically extract M3U group-title categories sorted by channel count
-  const dynamicCategories = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const ch of protocolFiltered) {
-      const grp = ch.group || 'General';
-      counts.set(grp, (counts.get(grp) || 0) + 1);
-    }
-    const sorted = Array.from(counts.entries())
-      .sort((a, b) => b[1] - a[1])
-      .map(([name]) => name);
-    return ['All', ...sorted];
-  }, [protocolFiltered]);
-
   const baseMatchingChannels = useMemo(() => {
     const q = channelFilter.trim().toLowerCase();
     return protocolFiltered.filter((ch) => {
       if (favoritesOnly && !favoriteChannelIds.includes(ch.id)) return false;
-      const matchesGroup =
-        selectedGroup === 'All' ||
-        ch.group.toLowerCase() === selectedGroup.toLowerCase();
+      const matchesGroup = channelMatchesCategory(ch, selectedGroup, favoriteChannelIds);
       const matchesQuery =
         !q ||
         ch.name.toLowerCase().includes(q) ||
@@ -146,6 +163,39 @@ export const LiveTvScreen: React.FC = () => {
     return baseMatchingChannels.filter((ch) => channelHealthMap[ch.id] === true);
   }, [baseMatchingChannels, verifiedOnly, channelHealthMap]);
 
+  // Group duplicate feeds sharing normalized base channel name & deduplicate identical URLs
+  const groupedChannels = useMemo<GroupedChannelEntry[]>(() => {
+    const groupMap = new Map<string, GroupedChannelEntry>();
+    for (const ch of filteredChannels) {
+      const cleanName = cleanChannelBaseName(ch.name) || ch.name.trim();
+      const key = cleanName.toLowerCase();
+      const existing = groupMap.get(key);
+      if (!existing) {
+        groupMap.set(key, {
+          key,
+          displayName: cleanName,
+          primary: ch,
+          feeds: [ch],
+        });
+      } else {
+        const alreadyHasUrl = existing.feeds.some(
+          (f) => f.streamUrl.trim() === ch.streamUrl.trim()
+        );
+        if (!alreadyHasUrl) {
+          existing.feeds.push(ch);
+          // Promote verified healthy stream to primary if current primary isn't verified
+          if (
+            channelHealthMap[ch.id] === true &&
+            channelHealthMap[existing.primary.id] !== true
+          ) {
+            existing.primary = ch;
+          }
+        }
+      }
+    }
+    return Array.from(groupMap.values());
+  }, [filteredChannels, channelHealthMap]);
+
   const handleScanPlayable = async (limit = 36) => {
     const candidates = baseMatchingChannels
       .filter((ch) => healthMapRef.current[ch.id] === undefined)
@@ -159,20 +209,26 @@ export const LiveTvScreen: React.FC = () => {
     setProbing(false);
   };
 
-  const pagedChannels = useMemo(
-    () => filteredChannels.slice(0, visibleCount),
-    [filteredChannels, visibleCount]
+  const pagedGroups = useMemo(
+    () => groupedChannels.slice(0, visibleCount),
+    [groupedChannels, visibleCount]
   );
 
   const errorEntries = Object.entries(liveErrors);
 
-  const handlePlayChannel = (channel: LiveChannel) => {
+  const handlePlayGroup = (entry: GroupedChannelEntry) => {
+    const orderedFeeds = [
+      entry.primary,
+      ...entry.feeds.filter((f) => f.id !== entry.primary.id),
+    ];
+    const channel = orderedFeeds[0];
     startPlayback({
       mediaId: 0,
       mediaType: 'live',
-      title: channel.name,
-      subtitle: `${channel.group} · ${channel.playlistName}`,
+      title: entry.displayName || channel.name,
+      subtitle: `${channel.group} · ${channel.playlistName}${orderedFeeds.length > 1 ? ` · ${orderedFeeds.length} Feeds` : ''}`,
       liveChannel: channel,
+      fallbackFeeds: orderedFeeds.slice(1),
     });
   };
 
@@ -186,7 +242,7 @@ export const LiveTvScreen: React.FC = () => {
           </h1>
           {liveSection === 'channels' && (
             <span className="text-xs font-mono-tabular text-slate-400">
-              {filteredChannels.length.toLocaleString()}
+              {groupedChannels.length.toLocaleString()}
             </span>
           )}
         </div>
@@ -230,7 +286,7 @@ export const LiveTvScreen: React.FC = () => {
               }
             }}
             disabled={liveSection === 'events' ? sportsLoading : liveLoading}
-            aria-label={liveSection === 'events' ? 'Refresh live events' : 'Refresh playlists'}
+            aria-label={liveSection === 'events' ? 'Refresh live events' : 'Refresh channels'}
             className="h-11 w-11 rounded-full bg-white/[0.06] border border-white/15 text-slate-200 hover:bg-white/[0.12] hover:border-white/25 flex items-center justify-center active:scale-90 transition-all"
           >
             <RefreshCw
@@ -242,8 +298,8 @@ export const LiveTvScreen: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => openLibrarySection('settings')}
-            aria-label="Manage playlists"
+            onClick={() => openLibrarySection('extensions')}
+            aria-label="Manage Live TV add-ons"
             className="hidden sm:inline-flex min-h-[44px] px-4 rounded-full bg-white/[0.06] border border-white/15 text-xs font-medium text-slate-200 hover:bg-white/[0.12] hover:border-white/25 items-center gap-2 active:scale-95 transition-all whitespace-nowrap"
           >
             <Settings className="h-4 w-4 text-[#3B82F6]" />
@@ -327,91 +383,42 @@ export const LiveTvScreen: React.FC = () => {
         />
       ) : (
         <>
-          {/* iptv-org Region Selector & Stream Filters */}
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="relative flex-1 min-w-[220px] sm:max-w-xs">
-              <Globe className="pointer-events-none h-4 w-4 text-[#3B82F6] absolute left-3.5 top-1/2 -translate-y-1/2 z-10" />
-          <select
-            aria-label="Select iptv-org region or country feed"
-            value={iptvRegion}
-            onChange={(e) => setIptvRegion(e.target.value)}
-            className="w-full appearance-none min-h-[42px] pl-10 pr-9 rounded-xl bg-white/[0.06] border border-white/15 text-xs sm:text-sm font-medium text-white focus:outline-none focus:ring-2 focus:ring-[#3B82F6] cursor-pointer"
-          >
-            {regions.map((reg) => (
-              <option key={reg.code} value={reg.code} className="bg-[#0B0D12] text-white">
-                {reg.label}
-              </option>
-            ))}
-          </select>
-          <ChevronDown className="pointer-events-none h-4 w-4 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            onClick={() => void handleScanPlayable(36)}
-            disabled={probing}
-            className="min-h-[42px] px-3.5 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] border border-white/15 text-xs font-medium text-slate-100 inline-flex items-center gap-1.5 active:scale-95 transition-all whitespace-nowrap shrink-0"
-          >
-            <CheckCircle2 className={`h-3.5 w-3.5 text-emerald-400 ${probing ? 'animate-spin' : ''}`} />
-            <span>{probing ? 'Scanning...' : 'Check Streams'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setVerifiedOnly((v) => !v)}
-            className={`min-h-[42px] px-3.5 py-1.5 rounded-xl border text-xs font-medium active:scale-95 transition-all whitespace-nowrap shrink-0 ${
-              verifiedOnly
-                ? 'bg-emerald-500/20 border-emerald-400/45 text-emerald-200'
-                : 'bg-white/[0.06] border-white/15 text-slate-200 hover:bg-white/[0.1]'
-            }`}
-          >
-            {verifiedOnly ? 'Playable Only' : 'All Streams'}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setHttpsOnly((v) => !v)}
-            className={`min-h-[42px] px-3.5 py-1.5 rounded-xl border text-xs font-medium active:scale-95 transition-all whitespace-nowrap shrink-0 ${
-              httpsOnly
-                ? 'bg-[#3B82F6]/20 border-[#3B82F6]/50 text-white'
-                : 'bg-white/[0.06] border-white/15 text-slate-300 hover:text-white'
-            }`}
-          >
-            {httpsOnly ? 'HTTPS' : 'All'}
-          </button>
-        </div>
-      </div>
-
-          {/* Placeholder removed because shared search input lives above */}
-
-      {/* Horizontal M3U Category Filter Strip */}
-      <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-        {dynamicCategories.map((cat) => {
-          const active = selectedGroup === cat;
-          return (
+          {/* Live Stream Quality & Health Filters */}
+          <div className="flex flex-wrap items-center justify-end gap-2">
             <button
-              key={cat}
               type="button"
-              onClick={() => setSelectedGroup(cat)}
-              className={`relative min-h-[40px] px-4 py-1.5 rounded-full text-xs sm:text-sm font-medium transition-colors whitespace-nowrap shrink-0 ${
-                active
-                  ? 'text-white font-semibold'
-                  : 'bg-white/[0.05] text-slate-300 border border-white/[0.1] hover:text-white hover:bg-white/[0.09]'
+              onClick={() => void handleScanPlayable(36)}
+              disabled={probing}
+              className="min-h-[42px] px-3.5 py-1.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.11] border border-white/15 text-xs font-medium text-slate-100 inline-flex items-center gap-1.5 active:scale-95 transition-all whitespace-nowrap shrink-0"
+            >
+              <CheckCircle2 className={`h-3.5 w-3.5 text-emerald-400 ${probing ? 'animate-spin' : ''}`} />
+              <span>{probing ? 'Scanning...' : 'Check Streams'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setVerifiedOnly((v) => !v)}
+              className={`min-h-[42px] px-3.5 py-1.5 rounded-xl border text-xs font-medium active:scale-95 transition-all whitespace-nowrap shrink-0 ${
+                verifiedOnly
+                  ? 'bg-emerald-500/20 border-emerald-400/45 text-emerald-200'
+                  : 'bg-white/[0.06] border-white/15 text-slate-200 hover:bg-white/[0.1]'
               }`}
             >
-              {active && (
-                <motion.span
-                  layoutId="live-cat-liquid"
-                  transition={{ type: 'spring', stiffness: 360, damping: 28 }}
-                  className="absolute inset-0 rounded-full bg-white/[0.18] border border-white/30"
-                />
-              )}
-              <span className="relative z-10">{cat}</span>
+              {verifiedOnly ? 'Playable Only' : 'All Streams'}
             </button>
-          );
-        })}
-      </div>
+
+            <button
+              type="button"
+              onClick={() => setHttpsOnly((v) => !v)}
+              className={`min-h-[42px] px-3.5 py-1.5 rounded-xl border text-xs font-medium active:scale-95 transition-all whitespace-nowrap shrink-0 ${
+                httpsOnly
+                  ? 'bg-[#3B82F6]/20 border-[#3B82F6]/50 text-white'
+                  : 'bg-white/[0.06] border-white/15 text-slate-300 hover:text-white'
+              }`}
+            >
+              {httpsOnly ? 'HTTPS' : 'All'}
+            </button>
+          </div>
 
       {errorEntries.length > 0 && (
         <div className="rounded-2xl bg-amber-500/10 border border-amber-400/30 p-3.5 space-y-2">
@@ -457,26 +464,33 @@ export const LiveTvScreen: React.FC = () => {
             </div>
           ))}
         </div>
-      ) : pagedChannels.length > 0 ? (
+      ) : pagedGroups.length > 0 ? (
         <>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3.5 sm:gap-4">
-            {pagedChannels.map((channel) => {
-              const isFav = favoriteChannelIds.includes(channel.id);
+            {pagedGroups.map((entry) => {
+              const channel = entry.primary;
+              const isFav = entry.feeds.some((f) => favoriteChannelIds.includes(f.id));
               const health = channelHealthMap[channel.id];
               return (
                 <div
-                  key={channel.id}
-                  onClick={() => handlePlayChannel(channel)}
+                  key={entry.key}
+                  onClick={() => handlePlayGroup(entry)}
                   role="button"
                   tabIndex={0}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' || e.key === ' ') {
                       e.preventDefault();
-                      handlePlayChannel(channel);
+                      handlePlayGroup(entry);
                     }
                   }}
                   className="group perf-card relative rounded-2xl liquid-glass hover:bg-white/[0.09] hover:border-white/25 hover:-translate-y-1 active:scale-[0.97] p-2.5 sm:p-3 cursor-pointer transition-all duration-150 flex flex-col focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#3B82F6]"
                 >
+                  {entry.feeds.length > 1 && (
+                    <span className="absolute top-4 left-4 z-10 px-2 py-0.5 rounded-full bg-black/75 border border-white/15 text-[10px] font-mono-tabular font-semibold text-sky-300">
+                      {entry.feeds.length} Feeds
+                    </span>
+                  )}
+
                   {/* Favorite toggle */}
                   <button
                     type="button"
@@ -484,7 +498,7 @@ export const LiveTvScreen: React.FC = () => {
                       e.stopPropagation();
                       toggleFavoriteChannel(channel.id);
                     }}
-                    aria-label={isFav ? `Unfavorite ${channel.name}` : `Favorite ${channel.name}`}
+                    aria-label={isFav ? `Unfavorite ${entry.displayName}` : `Favorite ${entry.displayName}`}
                     className={`absolute top-4 right-4 z-10 h-8 w-8 rounded-full flex items-center justify-center transition-opacity ${
                       isFav
                         ? 'bg-[#E50914] text-white opacity-100'
@@ -505,7 +519,7 @@ export const LiveTvScreen: React.FC = () => {
                       {health === true && (
                         <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shrink-0" />
                       )}
-                      <span className="truncate">{channel.name}</span>
+                      <span className="truncate">{entry.displayName}</span>
                     </h3>
                   </div>
                 </div>
@@ -514,14 +528,14 @@ export const LiveTvScreen: React.FC = () => {
           </div>
 
           {/* Pagination Load More */}
-          {pagedChannels.length < filteredChannels.length && (
+          {pagedGroups.length < groupedChannels.length && (
             <div className="pt-3 flex justify-center">
               <button
                 type="button"
                 onClick={() => setVisibleCount((c) => c + PAGE_SIZE)}
                 className="min-h-[44px] px-6 py-2.5 rounded-xl liquid-glass hover:border-white/30 text-sm font-medium text-white active:scale-95 transition-all"
               >
-                Load More ({filteredChannels.length - pagedChannels.length})
+                Load More ({groupedChannels.length - pagedGroups.length})
               </button>
             </div>
           )}

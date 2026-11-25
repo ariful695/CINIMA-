@@ -1,6 +1,5 @@
 import {
   JsonStreamEndpoint,
-  M3UPlaylistSource,
   MediaItem,
   ProviderToggles,
   StremioAddonConfig,
@@ -14,12 +13,12 @@ const KEYS = {
   WATCHLIST: 'kinostream_watchlist',
   CONTINUE_WATCHING: 'kinostream_continue_watching',
   JSON_ENDPOINTS: 'kinostream_json_endpoints',
-  M3U_PLAYLISTS: 'kinostream_m3u_playlists',
   STREMIO_ADDONS: 'kinostream_stremio_addons',
   RECENT_SEARCHES: 'kinostream_recent_searches',
   PREFERRED_QUALITY: 'kinostream_preferred_quality',
   FAVORITE_CHANNELS: 'kinostream_favorite_channels',
   PROVIDER_TOGGLES: 'kinostream_provider_toggles',
+  PLAYER_BUFFER_MB: 'kinostream_player_buffer_mb',
 } as const;
 
 export const DEFAULT_PROVIDER_TOGGLES: ProviderToggles = {
@@ -35,6 +34,7 @@ export const DEFAULT_PROVIDER_TOGGLES: ProviderToggles = {
   cinemeta: true,
   opensubtitles: true,
   bengali_serials: true,
+  plaviohd: true,
 };
 
 export const DEFAULT_JSON_ENDPOINTS: JsonStreamEndpoint[] = [];
@@ -110,12 +110,66 @@ export const DEFAULT_VERIFIED_STREAM_ADDONS: StremioAddonConfig[] = [
     version: '1.0.0',
   },
   {
+    id: 'stremio-mediafusion',
+    name: 'MediaFusion (Hindi & Multi-Audio)',
+    manifestUrl: 'https://mediafusion.elfhosted.com/manifest.json',
+    baseUrl: 'https://mediafusion.elfhosted.com',
+    enabled: true,
+    description: 'Universal Hindi, Tamil, Telugu & English stream index',
+    version: '1.0.0',
+  },
+  {
+    id: 'stremio-bollywood',
+    name: 'Bollywood Streams (Hindi)',
+    manifestUrl: 'https://bollywood-streams.onrender.com/manifest.json',
+    baseUrl: 'https://bollywood-streams.onrender.com',
+    enabled: true,
+    description: 'Hindi, Punjabi & South Indian dubbed movie and series streams',
+    version: '1.0.0',
+  },
+  {
+    id: 'stremio-cncverse-bridge',
+    name: 'CNCVerse Bridge (Hindi & Multi)',
+    manifestUrl: 'https://bridge.cncverse.com/stremio/manifest.json',
+    baseUrl: 'https://bridge.cncverse.com/stremio',
+    enabled: true,
+    description: 'High-availability Hindi, Bollywood & Dual-Audio streams',
+    version: '1.0.0',
+  },
+  {
+    id: 'stremio-flixfree',
+    name: 'Flix Free (Hindi & Multi)',
+    manifestUrl: 'https://flixfree.vercel.app/manifest.json',
+    baseUrl: 'https://flixfree.vercel.app',
+    enabled: true,
+    description: 'Hindi dubbed movies and Bollywood series streams',
+    version: '1.0.0',
+  },
+  {
+    id: 'stremio-comet',
+    name: 'Comet FeelsLegal (Hindi & Multi)',
+    manifestUrl: 'https://comet.feelslegal.com/manifest.json',
+    baseUrl: 'https://comet.feelslegal.com',
+    enabled: true,
+    description: 'Fast multi-quality P2P and web streams including Hindi & Dual-Audio',
+    version: '1.0.0',
+  },
+  {
     id: 'stremio-icv',
     name: 'IlCorsaroViola',
     manifestUrl: 'https://icv.stremio-italia.eu/manifest.json',
     baseUrl: 'https://icv.stremio-italia.eu',
     enabled: true,
     description: 'Multi-resolution European & English stream index',
+    version: '1.0.0',
+  },
+  {
+    id: 'stremio-plaviohd',
+    name: 'PlavioHD (Direct HD Movies & Series)',
+    manifestUrl: 'https://hd.plavio.site/manifest.json',
+    baseUrl: 'https://hd.plavio.site',
+    enabled: true,
+    description: 'Direct HTTPS HD movies, series and live streams',
     version: '1.0.0',
   },
 ];
@@ -142,23 +196,32 @@ export const DEFAULT_STREMIO_ADDONS: StremioAddonConfig[] = [
   },
 ];
 
-export const DEFAULT_M3U_PLAYLISTS: M3UPlaylistSource[] = [
-  {
-    id: 'builtin-open-channels',
-    name: 'Open Broadcast Channels (Built-in)',
-    url: 'builtin://open-channels.m3u',
-    enabled: true,
-    channelCount: 8,
-    lastSyncedAt: new Date().toISOString(),
-  },
-];
-
 function safeParse<T>(raw: string | null, fallback: T): T {
   if (!raw) return fallback;
   try {
     return JSON.parse(raw) as T;
   } catch {
     return fallback;
+  }
+}
+
+function safeSetItem(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // QuotaExceededError recovery: prune oldest continue-watching & recent searches and retry
+    try {
+      const cw = safeParse<WatchProgressItem[]>(localStorage.getItem(KEYS.CONTINUE_WATCHING), []);
+      if (cw.length > 6) {
+        const trimmed = cw.sort((a, b) => b.updatedAt - a.updatedAt).slice(0, Math.floor(cw.length / 2));
+        localStorage.setItem(KEYS.CONTINUE_WATCHING, JSON.stringify(trimmed));
+      } else {
+        localStorage.removeItem(KEYS.RECENT_SEARCHES);
+      }
+      localStorage.setItem(key, value);
+    } catch {
+      // Ignore if device storage is completely full
+    }
   }
 }
 
@@ -170,7 +233,7 @@ export const storageService = {
   },
 
   setTmdbApiKey(apiKey: string): void {
-    localStorage.setItem(KEYS.TMDB_API_KEY, apiKey.trim());
+    safeSetItem(KEYS.TMDB_API_KEY, apiKey.trim());
   },
 
   getWatchlist(): MediaItem[] {
@@ -178,7 +241,7 @@ export const storageService = {
   },
 
   saveWatchlist(items: MediaItem[]): void {
-    localStorage.setItem(KEYS.WATCHLIST, JSON.stringify(items));
+    safeSetItem(KEYS.WATCHLIST, JSON.stringify(items));
   },
 
   getContinueWatching(): WatchProgressItem[] {
@@ -192,13 +255,13 @@ export const storageService = {
   upsertContinueWatching(item: WatchProgressItem): WatchProgressItem[] {
     const list = this.getContinueWatching().filter((existing) => existing.key !== item.key);
     const updated = [item, ...list].slice(0, 24);
-    localStorage.setItem(KEYS.CONTINUE_WATCHING, JSON.stringify(updated));
+    safeSetItem(KEYS.CONTINUE_WATCHING, JSON.stringify(updated));
     return updated;
   },
 
   removeContinueWatching(key: string): WatchProgressItem[] {
     const updated = this.getContinueWatching().filter((item) => item.key !== key);
-    localStorage.setItem(KEYS.CONTINUE_WATCHING, JSON.stringify(updated));
+    safeSetItem(KEYS.CONTINUE_WATCHING, JSON.stringify(updated));
     return updated;
   },
 
@@ -227,19 +290,6 @@ export const storageService = {
     localStorage.setItem(KEYS.JSON_ENDPOINTS, JSON.stringify(endpoints));
   },
 
-  getM3UPlaylists(): M3UPlaylistSource[] {
-    const stored = safeParse<M3UPlaylistSource[] | null>(
-      localStorage.getItem(KEYS.M3U_PLAYLISTS),
-      null
-    );
-    if (stored && Array.isArray(stored)) return stored;
-    return DEFAULT_M3U_PLAYLISTS;
-  },
-
-  saveM3UPlaylists(playlists: M3UPlaylistSource[]): void {
-    localStorage.setItem(KEYS.M3U_PLAYLISTS, JSON.stringify(playlists));
-  },
-
   getRecentSearches(): string[] {
     return safeParse<string[]>(localStorage.getItem(KEYS.RECENT_SEARCHES), []);
   },
@@ -251,7 +301,7 @@ export const storageService = {
       (q) => q.toLowerCase() !== clean.toLowerCase()
     );
     const updated = [clean, ...list].slice(0, 8);
-    localStorage.setItem(KEYS.RECENT_SEARCHES, JSON.stringify(updated));
+    safeSetItem(KEYS.RECENT_SEARCHES, JSON.stringify(updated));
     return updated;
   },
 
@@ -265,14 +315,6 @@ export const storageService = {
 
   setPreferredQuality(quality: string): void {
     localStorage.setItem(KEYS.PREFERRED_QUALITY, quality);
-  },
-
-  getIptvRegion(): string {
-    return localStorage.getItem('kinostream_iptv_region') || 'master';
-  },
-
-  setIptvRegion(regionCode: string): void {
-    localStorage.setItem('kinostream_iptv_region', regionCode);
   },
 
   getDejavuApiUrl(): string {
@@ -313,6 +355,14 @@ export const storageService = {
         }
       }
     }
+    const plavioToggleMigrationKey = 'kinostream_plaviohd_migrated_v4_toggles';
+    if (localStorage.getItem(plavioToggleMigrationKey) !== '1') {
+      localStorage.setItem(plavioToggleMigrationKey, '1');
+      if (merged.plaviohd !== true) {
+        merged.plaviohd = true;
+        localStorage.setItem(KEYS.PROVIDER_TOGGLES, JSON.stringify(merged));
+      }
+    }
     return merged;
   },
 
@@ -332,6 +382,9 @@ export const storageService = {
     );
     const defaultFlagKey = 'kinostream_torrentio_default_v1';
     const workingPackFlagKey = 'kinostream_stremio_working_pack_v3';
+    const hindiPackFlagKey = 'kinostream_stremio_hindi_pack_v1';
+    const hindiPackFlagKeyV2 = 'kinostream_stremio_hindi_pack_v2';
+    const hindiPackFlagKeyV3 = 'kinostream_stremio_hindi_pack_v3';
     const normUrl = (u: string) =>
       (u || '').trim().replace(/^stremio:\/\//i, 'https://').replace(/\/+$/, '').toLowerCase();
     const deadAddonHosts = [
@@ -394,8 +447,16 @@ export const storageService = {
         }
       }
 
-      if (localStorage.getItem(workingPackFlagKey) !== '1') {
+      if (
+        localStorage.getItem(workingPackFlagKey) !== '1' ||
+        localStorage.getItem(hindiPackFlagKey) !== '1' ||
+        localStorage.getItem(hindiPackFlagKeyV2) !== '1' ||
+        localStorage.getItem(hindiPackFlagKeyV3) !== '1'
+      ) {
         localStorage.setItem(workingPackFlagKey, '1');
+        localStorage.setItem(hindiPackFlagKey, '1');
+        localStorage.setItem(hindiPackFlagKeyV2, '1');
+        localStorage.setItem(hindiPackFlagKeyV3, '1');
         const existingNormUrls = new Set(nextList.map((a) => normUrl(a.manifestUrl)));
         const existingIds = new Set(nextList.map((a) => a.id));
         const toPrepend: StremioAddonConfig[] = [];
@@ -413,6 +474,24 @@ export const storageService = {
         }
       }
 
+      const plavioMigrationKey = 'kinostream_plaviohd_migrated_v4';
+      if (localStorage.getItem(plavioMigrationKey) !== '1') {
+        localStorage.setItem(plavioMigrationKey, '1');
+        const existingIdx = nextList.findIndex(
+          (a) =>
+            a.id === 'stremio-plaviohd' ||
+            (typeof a.baseUrl === 'string' && a.baseUrl.includes('plavio.site'))
+        );
+        const plavioDef = DEFAULT_VERIFIED_STREAM_ADDONS.find((a) => a.id === 'stremio-plaviohd');
+        if (existingIdx === -1 && plavioDef) {
+          nextList = [{ ...plavioDef, enabled: true, addedAt: Date.now() }, ...nextList];
+          changed = true;
+        } else if (existingIdx !== -1 && !nextList[existingIdx].enabled) {
+          nextList[existingIdx] = { ...nextList[existingIdx], enabled: true };
+          changed = true;
+        }
+      }
+
       if (changed) {
         this.saveStremioAddons(nextList);
       }
@@ -420,6 +499,10 @@ export const storageService = {
     }
     localStorage.setItem(defaultFlagKey, '1');
     localStorage.setItem(workingPackFlagKey, '1');
+    localStorage.setItem(hindiPackFlagKey, '1');
+    localStorage.setItem(hindiPackFlagKeyV2, '1');
+    localStorage.setItem(hindiPackFlagKeyV3, '1');
+    localStorage.setItem('kinostream_plaviohd_migrated_v4', '1');
     return window.__KINO_API_CONFIG__?.defaultStremioAddons || DEFAULT_STREMIO_ADDONS;
   },
 
@@ -468,14 +551,24 @@ export const storageService = {
   },
 
   getP2PPrebufferSizeMb(): number {
-    const val = parseInt(localStorage.getItem('kinostream_p2p_prebuffer_size_mb') || '10', 10);
-    if (Number.isFinite(val) && val >= 5 && val <= 30) return val;
-    return 10;
+    const val = parseInt(localStorage.getItem('kinostream_p2p_prebuffer_size_mb') || '5', 10);
+    if (Number.isFinite(val) && val >= 2 && val <= 30) return val;
+    return 5;
   },
 
   setP2PPrebufferSizeMb(mb: number): void {
-    const clamped = Math.max(5, Math.min(30, Math.round(mb)));
-    localStorage.setItem('kinostream_p2p_prebuffer_size_mb', String(clamped));
+    const clamped = Math.max(2, Math.min(30, Math.round(mb)));
+    safeSetItem('kinostream_p2p_prebuffer_size_mb', String(clamped));
+  },
+
+  getPlayerBufferMb(): 25 | 50 | 75 | 100 {
+    const raw = parseInt(localStorage.getItem(KEYS.PLAYER_BUFFER_MB) || '50', 10);
+    if (raw === 25 || raw === 50 || raw === 75 || raw === 100) return raw;
+    return 50;
+  },
+
+  setPlayerBufferMb(mb: 25 | 50 | 75 | 100): void {
+    safeSetItem(KEYS.PLAYER_BUFFER_MB, String(mb));
   },
 };
 

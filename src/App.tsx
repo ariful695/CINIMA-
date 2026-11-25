@@ -21,7 +21,10 @@ import { SearchScreen } from './components/SearchScreen';
 import { ServerPickerModal } from './components/ServerPickerModal';
 import { SettingsScreen } from './components/SettingsScreen';
 import { VideoPlayerScreen } from './components/VideoPlayerScreen';
+import { PWAInstallButton } from './components/PWAInstallButton';
+import { OfflineIndicator } from './components/OfflineIndicator';
 import { AppProvider, useAppState } from './state/AppContext';
+import { nativeAndroidBridge } from './services/nativeAndroidBridge';
 import { NavTab, THEME_ACCENTS } from './types/media';
 
 const DOCK_ITEMS: Array<{
@@ -51,9 +54,15 @@ const AppShell: React.FC = () => {
     librarySubTab,
     openLibrarySection,
     selectedMedia,
+    closeMediaDetails,
     playerSession,
+    closePlayback,
+    serverPickerTarget,
+    closeServerPicker,
     themeColor,
     offlineDownloads,
+    cinematicIntroTarget,
+    cancelCinematicIntro,
   } = useAppState();
 
   const accent = THEME_ACCENTS[themeColor || 'red'];
@@ -61,6 +70,47 @@ const AppShell: React.FC = () => {
   const [navVisible, setNavVisible] = React.useState(true);
   const [scrolledDown, setScrolledDown] = React.useState(false);
   const lastScrollYRef = React.useRef(0);
+
+  React.useEffect(() => {
+    void nativeAndroidBridge.setupSystemBars();
+  }, []);
+
+  React.useEffect(() => {
+    return nativeAndroidBridge.registerBackButtonHandler(() => {
+      if (cinematicIntroTarget) {
+        cancelCinematicIntro();
+        return true;
+      }
+      if (playerSession) {
+        closePlayback();
+        return true;
+      }
+      if (serverPickerTarget) {
+        closeServerPicker();
+        return true;
+      }
+      if (selectedMedia) {
+        closeMediaDetails();
+        return true;
+      }
+      if (activeTab !== 'home') {
+        setActiveTab('home');
+        return true;
+      }
+      return false;
+    });
+  }, [
+    activeTab,
+    cancelCinematicIntro,
+    cinematicIntroTarget,
+    closeMediaDetails,
+    closePlayback,
+    closeServerPicker,
+    playerSession,
+    selectedMedia,
+    serverPickerTarget,
+    setActiveTab,
+  ]);
 
   React.useEffect(() => {
     const handleScroll = () => {
@@ -246,6 +296,10 @@ const AppShell: React.FC = () => {
             </motion.button>
           </nav>
         </div>
+
+        <div className="pt-4 border-t border-white/[0.08]">
+          <PWAInstallButton variant="sidebar" />
+        </div>
       </aside>
 
       {/* Mobile Compact Glass Header (transparent over Home hero at top, frosted on scroll/other tabs) */}
@@ -266,7 +320,8 @@ const AppShell: React.FC = () => {
           EUTHOPIAR
         </button>
 
-        <div className="flex items-center gap-2.5">
+        <div className="flex items-center gap-2">
+          <PWAInstallButton variant="compact" />
           <button
             type="button"
             onClick={() => setActiveTab('search')}
@@ -354,10 +409,10 @@ const AppShell: React.FC = () => {
                 }
               }}
               aria-label={item.label}
-              className={`relative min-h-[46px] rounded-xl flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap transform scale-110 ${
+              className={`relative min-h-[44px] rounded-xl flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap ${
                 active
-                  ? 'text-slate-900 px-3.5 font-bold'
-                  : 'text-slate-400 hover:text-white px-3'
+                  ? 'text-slate-900 px-3 sm:px-3.5 font-bold'
+                  : 'text-slate-400 hover:text-white px-2.5'
               }`}
             >
               {active && (
@@ -403,6 +458,15 @@ const AppShell: React.FC = () => {
         )}
       </AnimatePresence>
 
+      {/* Server / Provider Picker Modal */}
+      <AnimatePresence>
+        {serverPickerTarget && (
+          <ServerPickerModal
+            key={`picker-${serverPickerTarget.mediaType}-${serverPickerTarget.mediaId}-${serverPickerTarget.seasonNumber || 0}-${serverPickerTarget.episodeNumber || 0}`}
+          />
+        )}
+      </AnimatePresence>
+
       {/* Fullscreen Custom Video Player Overlay */}
       <AnimatePresence>
         {playerSession && (
@@ -419,9 +483,79 @@ const AppShell: React.FC = () => {
         )}
       </AnimatePresence>
 
-      {/* Pre-Play Server Selector Modal */}
-      <ServerPickerModal />
+      {/* Cinematic Logo Intro Overlay (2 seconds pure black background with logo, then auto-vanish) */}
+      <AnimatePresence mode="wait">
+        {cinematicIntroTarget && (
+          <CinematicLogoOverlay
+            key={`intro-${cinematicIntroTarget.id}`}
+            title={cinematicIntroTarget.title}
+            logoCandidates={cinematicIntroTarget.logoCandidates}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Offline Connectivity Indicator */}
+      <OfflineIndicator />
     </div>
+  );
+};
+
+const CinematicLogoOverlay: React.FC<{
+  title: string;
+  logoCandidates: string[];
+}> = ({ title, logoCandidates }) => {
+  const [candidateIdx, setCandidateIdx] = React.useState(0);
+  const [allFailed, setAllFailed] = React.useState(false);
+
+  React.useEffect(() => {
+    setCandidateIdx(0);
+    setAllFailed(false);
+  }, [logoCandidates]);
+
+  const currentLogoUrl =
+    !allFailed && candidateIdx < logoCandidates.length
+      ? logoCandidates[candidateIdx]
+      : null;
+
+  const handleImgError = () => {
+    if (candidateIdx + 1 < logoCandidates.length) {
+      setCandidateIdx((prev) => prev + 1);
+    } else {
+      setAllFailed(true);
+    }
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      exit={{ opacity: 0, scale: 1.06 }}
+      transition={{ duration: 0.42, ease: [0.16, 1, 0.3, 1] }}
+      className="fixed inset-0 z-[60] bg-black flex items-center justify-center p-6 text-center select-none pointer-events-auto"
+    >
+      <motion.div
+        initial={{ opacity: 0, scale: 0.9 }}
+        animate={{ opacity: 1, scale: 1 }}
+        exit={{ opacity: 0, scale: 1.08 }}
+        transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+        className="relative z-10 max-w-lg mx-auto flex items-center justify-center"
+      >
+        {currentLogoUrl ? (
+          <img
+            key={currentLogoUrl}
+            src={currentLogoUrl}
+            alt={title}
+            referrerPolicy="no-referrer"
+            onError={handleImgError}
+            className="max-h-36 sm:max-h-48 max-w-[300px] sm:max-w-[440px] w-auto object-contain mx-auto drop-shadow-[0_10px_40px_rgba(0,0,0,0.95)]"
+          />
+        ) : (
+          <h1 className="font-display text-3xl sm:text-5xl font-extrabold tracking-tight text-white [text-wrap:balance]">
+            {title}
+          </h1>
+        )}
+      </motion.div>
+    </motion.div>
   );
 };
 

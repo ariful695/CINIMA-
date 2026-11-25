@@ -1,11 +1,15 @@
 import React, { useState } from 'react';
 import {
   Bookmark,
+  Check,
+  Code2,
+  Copy,
   Download,
   ExternalLink,
   Layers,
   Plus,
   RefreshCw,
+  Smartphone,
   Trash2,
   Tv,
   Zap,
@@ -15,26 +19,23 @@ import {
   STREMIO_ADDONS_NET_DIRECTORY,
 } from '../data/nuvioAndStremioCatalog';
 import { storageService } from '../services/storageService';
+import { streamProviderService } from '../services/streamProviderService';
 import { normalizeStremioUrlKey, stremioAddonService } from '../services/stremioAddonService';
 import { ProviderHealthEntry, useAppState } from '../state/AppContext';
 import {
-  M3UPlaylistSource,
   MediaItem,
-  StremioAddonConfig,
   THEME_ACCENTS,
   ThemeColor,
 } from '../types/media';
 import { motion } from 'motion/react';
 import { MediaCard } from './MediaCard';
+import { PWAInstallButton } from './PWAInstallButton';
 import { TokenCreditStatusBadge } from './TokenCreditStatusBadge';
 
 export const SettingsScreen: React.FC = () => {
   const {
     watchlist,
-    startPlayback,
-    m3uPlaylists,
-    saveM3UPlaylists,
-    refreshLiveChannels,
+    openServerPicker,
     clearWatchHistory,
     continueWatching,
     librarySubTab: subTab,
@@ -63,13 +64,11 @@ export const SettingsScreen: React.FC = () => {
     checkAllProvidersHealth,
   } = useAppState();
 
-  // Add M3U playlist form
-  const [newM3uName, setNewM3uName] = useState('');
-  const [newM3uUrl, setNewM3uUrl] = useState('');
-  const [newM3uRaw, setNewM3uRaw] = useState('');
-  const [m3uMode, setM3uMode] = useState<'url' | 'raw'>('url');
   const [preferredQuality, setPreferredQuality] = useState(() =>
     storageService.getPreferredQuality()
+  );
+  const [playerBufferMb, setPlayerBufferMb] = useState<25 | 50 | 75 | 100>(() =>
+    storageService.getPlayerBufferMb()
   );
   const [p2pEnabled, setP2pEnabled] = useState(() => storageService.getP2PTorrentEnabled());
   const [p2pPrebuffer, setP2pPrebuffer] = useState(() => storageService.getP2PPrebufferSizeMb());
@@ -83,11 +82,20 @@ export const SettingsScreen: React.FC = () => {
   const [providerToggles, setProviderToggles] = useState(() =>
     storageService.getProviderToggles()
   );
+  const [copiedGradleCmd, setCopiedGradleCmd] = useState(false);
+
+  const handleCopyGradleCmd = () => {
+    const cmd = 'npm run android:sync && cd android && ./gradlew assembleDebug';
+    void navigator.clipboard?.writeText(cmd).catch(() => {});
+    setCopiedGradleCmd(true);
+    setTimeout(() => setCopiedGradleCmd(false), 2000);
+  };
 
   const toggleProvider = (key: string) => {
     const updated = { ...providerToggles, [key]: !(providerToggles[key] ?? true) };
     setProviderToggles(updated);
     storageService.setProviderToggles(updated);
+    streamProviderService.clearCache();
   };
 
   const renderStatusBadge = (statusInfo?: ProviderHealthEntry) => {
@@ -229,48 +237,25 @@ export const SettingsScreen: React.FC = () => {
     }
   };
 
-  const handleAddM3u = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newM3uName.trim()) return;
-    if (m3uMode === 'url' && !newM3uUrl.trim()) return;
-    if (m3uMode === 'raw' && !newM3uRaw.trim()) return;
-
-    const item: M3UPlaylistSource = {
-      id: `m3u-${Date.now()}`,
-      name: newM3uName.trim(),
-      url: m3uMode === 'url' ? newM3uUrl.trim() : `inline://${Date.now()}.m3u`,
-      rawContent: m3uMode === 'raw' ? newM3uRaw.trim() : undefined,
-      enabled: true,
-      lastSyncedAt: new Date().toISOString(),
-    };
-
-    saveM3UPlaylists([item, ...m3uPlaylists]);
-    setNewM3uName('');
-    setNewM3uUrl('');
-    setNewM3uRaw('');
-  };
-
-  const toggleM3u = (id: string) => {
-    saveM3UPlaylists(
-      m3uPlaylists.map((pl) => (pl.id === id ? { ...pl, enabled: !pl.enabled } : pl))
-    );
-  };
-
-  const removeM3u = (id: string) => {
-    saveM3UPlaylists(m3uPlaylists.filter((pl) => pl.id !== id));
-  };
-
   const handleQuickPlay = (item: MediaItem) => {
-    startPlayback({
+    openServerPicker({
       mediaId: item.id,
       mediaType: item.mediaType,
       title: item.title,
+      subtitle: item.mediaType === 'tv' ? 'Season 1 · Episode 1' : undefined,
       posterPath: item.posterPath,
       backdropPath: item.backdropPath,
       fallbackPoster: item.fallbackPoster,
       fallbackBackdrop: item.fallbackBackdrop,
+      imdbId: item.imdbId,
+      dejavuId: item.dejavuId,
+      archiveIdentifier: item.archiveIdentifier,
+      genreIds: item.genreIds,
+      originalLanguage: item.originalLanguage,
+      releaseYear: item.releaseDate ? parseInt(item.releaseDate.slice(0, 4), 10) || undefined : undefined,
       seasonNumber: item.mediaType === 'tv' ? 1 : undefined,
       episodeNumber: item.mediaType === 'tv' ? 1 : undefined,
+      bengaliSerialSlug: item.bengaliSerialSlug,
     });
   };
 
@@ -300,7 +285,7 @@ export const SettingsScreen: React.FC = () => {
               <motion.span
                 layoutId="settings-tab-liquid"
                 transition={{ type: 'spring', stiffness: 330, damping: 24, mass: 0.85 }}
-                className="absolute inset-0 rounded-lg bg-white/[0.18] backdrop-blur-xl border border-white/30 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
+                className="absolute inset-0 rounded-lg bg-white/[0.18] border border-white/30 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
               />
             )}
             <span className="relative z-10">My List ({watchlist.length})</span>
@@ -318,7 +303,7 @@ export const SettingsScreen: React.FC = () => {
               <motion.span
                 layoutId="settings-tab-liquid"
                 transition={{ type: 'spring', stiffness: 330, damping: 24, mass: 0.85 }}
-                className="absolute inset-0 rounded-lg bg-white/[0.18] backdrop-blur-xl border border-white/30 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
+                className="absolute inset-0 rounded-lg bg-white/[0.18] border border-white/30 shadow-[inset_0_1px_0_rgba(255,255,255,0.4)]"
               />
             )}
             <span className="relative z-10">Settings</span>
@@ -371,6 +356,61 @@ export const SettingsScreen: React.FC = () => {
       {/* Sub-tab 2: App Settings */}
       {subTab === 'settings' && (
         <div className="space-y-8">
+          {/* Install as Android / Mobile App */}
+          <PWAInstallButton variant="card" />
+
+          {/* Native Android Studio & Kotlin Codebase */}
+          <section className="rounded-2xl liquid-glass p-5 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="flex items-start gap-3">
+                <div className="h-10 w-10 rounded-xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center shrink-0">
+                  <Smartphone className="h-5 w-5 text-emerald-400" />
+                </div>
+                <div>
+                  <h2 className="font-display text-lg font-semibold text-white">
+                    Native Android Studio Project (Kotlin &amp; ExoPlayer)
+                  </h2>
+                  <p className="text-xs sm:text-sm text-slate-400 mt-0.5">
+                    Package <code className="text-slate-200">com.euthopiar.app</code> &bull; Native{' '}
+                    <code className="text-slate-200">Media3 ExoPlayer</code>, OkHttp custom stream headers, Picture-in-Picture, <code className="text-slate-200">DownloadManager</code>, hardware back navigation, and deep links (<code className="text-slate-200">euthopiar://</code>).
+                  </p>
+                </div>
+              </div>
+
+              <a
+                href="/api/android/archive"
+                download="euthopiar-android-studio-project.tar.gz"
+                className="min-h-[42px] px-4 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 border border-emerald-500/40 text-xs sm:text-sm font-bold text-emerald-200 inline-flex items-center justify-center gap-2 transition-colors whitespace-nowrap shrink-0"
+              >
+                <Code2 className="h-4 w-4" />
+                <span>Download /android Source</span>
+              </a>
+            </div>
+
+            <div className="rounded-xl bg-black/40 border border-white/[0.10] p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <code className="text-xs font-mono-tabular text-slate-300 overflow-x-auto whitespace-nowrap">
+                npm run android:sync &amp;&amp; cd android &amp;&amp; ./gradlew assembleDebug
+              </code>
+              <button
+                type="button"
+                onClick={handleCopyGradleCmd}
+                className="min-h-[34px] px-3 rounded-lg bg-white/10 hover:bg-white/15 text-xs font-semibold text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+              >
+                {copiedGradleCmd ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-emerald-400" />
+                    <span>Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5" />
+                    <span>Copy Build Cmd</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </section>
+
           {/* Install Repository / CloudStream / Nuvio / Stremio Extension Manager */}
           <section className="rounded-2xl liquid-glass p-5 sm:p-6 space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -551,7 +591,7 @@ export const SettingsScreen: React.FC = () => {
                     onClick={() => void handleInstallRepository()}
                     className="px-3 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/30 text-xs font-semibold text-white whitespace-nowrap shrink-0"
                   >
-                    Continue
+                    Retry
                   </button>
                 </div>
               )}
@@ -680,7 +720,7 @@ export const SettingsScreen: React.FC = () => {
                       onClick={() => void checkAllProviderStatuses()}
                       className="px-3 py-1 rounded-lg bg-red-500/25 hover:bg-red-500/40 text-white font-semibold"
                     >
-                      Continue
+                      Retry Check
                     </button>
                   </>
                 ) : (
@@ -704,14 +744,15 @@ export const SettingsScreen: React.FC = () => {
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {[
+                { key: 'plaviohd', name: 'PlavioHD (Direct HD Movies & Series)', desc: 'Direct HTTPS 1080p/4K movies, series & multi-audio streams' },
+                { key: 'hdhub', name: 'HdHub Hindi & Multi-Audio', desc: 'Hindi, dual-audio & English streams' },
+                { key: 'nuvio', name: 'Nuvio & Hindi-Nuvio Scrapers', desc: 'HLS/MP4 scrapers including DesiFlix, NetMirror & Castle' },
+                { key: 'cloudstream', name: 'CloudStream Hindi & Multi Plugins', desc: 'HDHub4u, MultiMovies, HindMoviez, 4KHDHub & more' },
                 { key: 'torrentio', name: 'Torrentio P2P Scraper', desc: 'High speed torrent & seeders index' },
-                { key: 'nuvio', name: 'Nuvio Direct Scraper', desc: 'HLS and MP4 web video scraper' },
                 { key: 'meteor', name: 'Meteor P2P Add-on', desc: 'Movies, series & anime P2P index' },
                 { key: 'torrentsdb', name: 'TorrentsDB Indexer', desc: 'Multi-quality torrent mirrors' },
-                { key: 'hdhub', name: 'HdHub Multi-Audio', desc: 'Hindi, dual-audio & English streams' },
-                { key: 'notorrent', name: 'NoTorrent Direct HTTP', desc: 'Direct HTTP streams for movies & series' },
+                { key: 'pipe', name: 'Pipe Direct Streams', desc: 'Fast workers-backed movie & series stream index' },
                 { key: 'peerflix', name: 'Peerflix Add-on', desc: 'Community multi-resolution streams' },
-                { key: 'cloudstream', name: 'CloudStream Plugins', desc: 'Installed repo plugin resolver' },
                 { key: 'cinemeta', name: 'Cinemeta Catalog', desc: 'Official metadata database' },
                 { key: 'opensubtitles', name: 'OpenSubtitles v3', desc: 'Multi-language subtitle engine' },
                 { key: 'bengali_serials', name: 'Zee Bangla & Bengali Serials', desc: 'Daily Zee Bangla serials (Kusum, Parineeta) & Sony AATH (Gopal Bhar)' },
@@ -803,163 +844,64 @@ export const SettingsScreen: React.FC = () => {
             </div>
           </section>
 
-          {/* M3U Live TV Playlist Manager */}
-          <section className="rounded-2xl liquid-glass p-5 sm:p-6 space-y-5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div className="flex items-start gap-3">
-                <div className="h-10 w-10 rounded-xl bg-black/35 border border-white/[0.12] flex items-center justify-center shrink-0">
-                  <Tv className="h-5 w-5 text-[#3B82F6]" />
-                </div>
-                <div>
-                  <h2 className="font-display text-lg font-semibold text-white">
-                    Live TV Playlists
-                  </h2>
-                  <p className="text-xs sm:text-sm text-slate-400 mt-0.5">
-                    Add .m3u playlist URLs or paste #EXTM3U blocks.
-                  </p>
-                </div>
+          {/* Playback Preferences */}
+          <section className="rounded-2xl liquid-glass p-5 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-sm font-semibold text-white">
+                  Preferred Quality
+                </h2>
               </div>
 
-              <button
-                type="button"
-                onClick={() => void refreshLiveChannels()}
-                className="min-h-[40px] px-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-medium text-slate-200 inline-flex items-center gap-2 whitespace-nowrap shrink-0"
+              <select
+                aria-label="Preferred Stream Quality"
+                value={preferredQuality}
+                onChange={(e) => {
+                  setPreferredQuality(e.target.value);
+                  storageService.setPreferredQuality(e.target.value);
+                }}
+                className="min-h-[42px] px-4 rounded-xl bg-black/35 border border-white/[0.12] text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#3B82F6]"
               >
-                <RefreshCw className="h-3.5 w-3.5" />
-                <span>Sync Channels</span>
-              </button>
+                <option value="Auto">Auto (Adaptive Bitrate)</option>
+                <option value="1080p">1080p Full HD</option>
+                <option value="720p">720p HD</option>
+                <option value="480p">480p Data Saver</option>
+              </select>
             </div>
 
-            <div className="divide-y divide-white/[0.06] rounded-xl bg-black/35 border border-white/[0.10]">
-              {m3uPlaylists.map((pl) => (
-                <div
-                  key={pl.id}
-                  className="p-3.5 sm:p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3"
-                >
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-white truncate">{pl.name}</p>
-                    <p className="text-xs font-mono-tabular text-slate-400 truncate mt-0.5">
-                      {pl.rawContent ? 'Inline #EXTM3U Playlist' : pl.url}
-                    </p>
-                  </div>
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pt-3 border-t border-white/[0.08]">
+              <div>
+                <h2 className="text-sm font-semibold text-white">
+                  Player Buffer Cap
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Max in-memory video pre-buffer cap for HLS and native ExoPlayer.
+                </p>
+              </div>
 
-                  <div className="flex items-center gap-2 shrink-0">
+              <div className="inline-flex items-center gap-1.5 p-1 rounded-xl bg-black/40 border border-white/[0.10]">
+                {([25, 50, 75, 100] as const).map((mb) => {
+                  const active = playerBufferMb === mb;
+                  return (
                     <button
+                      key={mb}
                       type="button"
-                      onClick={() => toggleM3u(pl.id)}
-                      className={`min-h-[36px] px-3 rounded-lg text-xs font-medium transition-colors ${
-                        pl.enabled
-                          ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30'
-                          : 'bg-white/5 text-slate-400 border border-white/10'
+                      onClick={() => {
+                        setPlayerBufferMb(mb);
+                        storageService.setPlayerBufferMb(mb);
+                      }}
+                      className={`min-h-[36px] px-3 rounded-lg text-xs font-mono-tabular font-semibold transition-colors ${
+                        active
+                          ? 'bg-[#3B82F6] text-white shadow-sm'
+                          : 'text-slate-300 hover:text-white hover:bg-white/[0.06]'
                       }`}
                     >
-                      {pl.enabled ? 'Active' : 'Paused'}
+                      {mb}M
                     </button>
-                    {pl.url !== 'builtin://open-channels.m3u' && (
-                      <button
-                        type="button"
-                        onClick={() => removeM3u(pl.id)}
-                        aria-label={`Delete ${pl.name}`}
-                        className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-white/5 hover:bg-red-500/20 text-slate-400 hover:text-red-300 transition-colors"
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-
-            <div className="space-y-3">
-              <div className="flex items-center gap-1.5 p-1 rounded-lg bg-black/35 border border-white/[0.10] w-fit">
-                <button
-                  type="button"
-                  onClick={() => setM3uMode('url')}
-                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                    m3uMode === 'url'
-                      ? 'bg-[#161B26] text-white'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Playlist URL
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setM3uMode('raw')}
-                  className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                    m3uMode === 'raw'
-                      ? 'bg-[#161B26] text-white'
-                      : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Paste #EXTM3U Text
-                </button>
+                  );
+                })}
               </div>
-
-              <form onSubmit={handleAddM3u} className="space-y-3">
-                <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
-                  <input
-                    type="text"
-                    value={newM3uName}
-                    onChange={(e) => setNewM3uName(e.target.value)}
-                    placeholder="Playlist Name (e.g. Global News)"
-                    className="sm:col-span-4 min-h-[44px] px-3.5 rounded-xl bg-black/35 border border-white/[0.12] text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#3B82F6]"
-                  />
-                  {m3uMode === 'url' ? (
-                    <input
-                      type="url"
-                      value={newM3uUrl}
-                      onChange={(e) => setNewM3uUrl(e.target.value)}
-                      placeholder="https://example.com/playlist.m3u"
-                      className="sm:col-span-6 min-h-[44px] px-3.5 rounded-xl bg-black/35 border border-white/[0.12] text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#3B82F6] font-mono-tabular"
-                    />
-                  ) : (
-                    <div className="sm:col-span-6" />
-                  )}
-                  <button
-                    type="submit"
-                    className="sm:col-span-2 min-h-[44px] px-4 rounded-xl bg-[#3B82F6] hover:bg-blue-500 text-white text-sm font-semibold inline-flex items-center justify-center gap-1.5 transition-colors whitespace-nowrap"
-                  >
-                    <Plus className="h-4 w-4" />
-                    <span>Add M3U</span>
-                  </button>
-                </div>
-
-                {m3uMode === 'raw' && (
-                  <textarea
-                    rows={4}
-                    value={newM3uRaw}
-                    onChange={(e) => setNewM3uRaw(e.target.value)}
-                    placeholder={`#EXTM3U\n#EXTINF:-1 group-title="News",Channel Name\nhttps://example.com/live/stream.m3u8`}
-                    className="w-full p-3.5 rounded-xl bg-black/35 border border-white/[0.12] text-xs font-mono-tabular text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-[#3B82F6]"
-                  />
-                )}
-              </form>
             </div>
-          </section>
-
-          {/* Playback Preferences */}
-          <section className="rounded-2xl liquid-glass p-5 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div>
-              <h2 className="text-sm font-semibold text-white">
-                Preferred Quality
-              </h2>
-            </div>
-
-            <select
-              aria-label="Preferred Stream Quality"
-              value={preferredQuality}
-              onChange={(e) => {
-                setPreferredQuality(e.target.value);
-                storageService.setPreferredQuality(e.target.value);
-              }}
-              className="min-h-[42px] px-4 rounded-xl bg-black/35 border border-white/[0.12] text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#3B82F6]"
-            >
-              <option value="Auto">Auto (Adaptive Bitrate)</option>
-              <option value="1080p">1080p Full HD</option>
-              <option value="720p">720p HD</option>
-              <option value="480p">480p Data Saver</option>
-            </select>
           </section>
 
           {/* P2P Torrent Streaming Preferences */}
@@ -992,7 +934,7 @@ export const SettingsScreen: React.FC = () => {
             {p2pEnabled && (
               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-white/[0.08]">
                 <span className="text-xs text-slate-300 font-medium">
-                  Pre-buffer Size Selector (5–30 MB)
+                  Pre-buffer Size Selector (2–30 MB)
                 </span>
                 <select
                   aria-label="P2P Prebuffer Size"
@@ -1004,8 +946,9 @@ export const SettingsScreen: React.FC = () => {
                   }}
                   className="min-h-[42px] px-4 rounded-xl bg-black/35 border border-white/[0.12] text-sm text-white focus:outline-none focus:ring-2 focus:ring-[#3B82F6]"
                 >
-                  <option value={5}>5 MB (Fast start)</option>
-                  <option value={10}>10 MB (Recommended)</option>
+                  <option value={2}>2 MB (Ultra fast)</option>
+                  <option value={5}>5 MB (Recommended · Fast start)</option>
+                  <option value={10}>10 MB</option>
                   <option value={15}>15 MB</option>
                   <option value={20}>20 MB</option>
                   <option value={25}>25 MB</option>

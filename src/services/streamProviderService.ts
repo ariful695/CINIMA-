@@ -10,7 +10,6 @@ import { dejavuApiService } from './dejavuApiService';
 import { nuvioService } from './nuvioService';
 import { storageService } from './storageService';
 import { stremioAddonService } from './stremioAddonService';
-import { streamConnector } from './streamConnector';
 import { tmdbService } from './tmdbService';
 import { cloudStreamProviderResolver } from './cloudStreamProviderResolver';
 
@@ -44,6 +43,15 @@ export interface IStreamProviderService {
     params: StreamQueryParams,
     options?: StreamResolveOptions
   ): Promise<StreamResolutionResult>;
+}
+
+export interface IFullStreamProviderService extends IStreamProviderService {
+  prefetchStreams(params: StreamQueryParams): void;
+  subscribeAndResolveStreams(
+    params: StreamQueryParams,
+    onUpdate: (result: StreamResolutionResult, isDone: boolean) => void
+  ): () => void;
+  clearCache(): void;
 }
 
 function createTextBlobUrl(content: string, mime = 'text/vtt'): string {
@@ -306,7 +314,7 @@ function matchesEpisodeFilter(source: StreamSource, params: StreamQueryParams): 
   if (params.mediaType !== 'tv' || !params.seasonNumber || !params.episodeNumber) return true;
   const text = `${source.label} ${source.note || ''}`;
   const exact = new RegExp(
-    `(?:s0?${params.seasonNumber}[\\s._-]*e0?${params.episodeNumber}\\b|\\b${params.seasonNumber}x0?${params.episodeNumber}\\b)`,
+    `(?:s0?${params.seasonNumber}[\\s._-]*e0?${params.episodeNumber}\\b|\\b${params.seasonNumber}x0?${params.episodeNumber}\\b|\\bseason[.\\s_-]*0?${params.seasonNumber}[.\\s_-]*episode[.\\s_-]*0?${params.episodeNumber}\\b)`,
     'i'
   );
   if (exact.test(text)) return true;
@@ -324,19 +332,35 @@ function rankSource(
   if (s.format === 'embed') return 20;
   const meta = `${s.audioLanguage || ''} ${s.label} ${s.note || ''}`;
   const isP2P = s.url.includes('/api/torrent/stream');
-  let score = s.isVerified && s.isDirectPlayable !== false && !isP2P ? 0 : !isP2P ? 2 : 4;
+  const isRemux = s.url.includes('remux=1');
+  const isDirectInstant = !isP2P && !isRemux && s.isDirectPlayable !== false;
 
-  const isDual = /(dual|multi)|\+/i.test(meta);
-  if (preferredRegex && preferredRegex.test(meta)) score += 0;
-  else if (isDual) score += 0.2;
-  else if (originalRegex.test(meta)) score += 0.35;
-  else if (/(english|eng)/i.test(meta)) score += 0.8;
-  else if (/(hindi|bengali|tamil|telugu|malayalam|french|russian|spanish|german)/i.test(meta))
-    score += 3.5;
-  else score += 1.2;
+  // Instant direct HTTP/HLS streams always outrank remux=1 and P2P torrents so playback starts immediately
+  let score = isDirectInstant ? (s.isVerified ? -12 : -9) : !isP2P ? 2 : 14;
+  if (isDirectInstant && (s.format === 'hls' || s.url.includes('.m3u8'))) {
+    score -= 2.0;
+  }
+
+  const isStrictHindi =
+    /\b(hindi|hin)\b|🇮🇳|desiflix|desicinemas|hdhub|hindmoviez|bollywood|multimovies/i.test(meta);
+  if (isStrictHindi) {
+    score -= isP2P ? 6.0 : 15.0; // Strictly prioritize Hindi streams first within direct & P2P tiers
+  } else if (preferredRegex && preferredRegex.test(meta)) {
+    score -= 2.0;
+  } else if (/(dual|multi)|\+/i.test(meta)) {
+    score -= 1.0;
+  } else if (originalRegex.test(meta)) {
+    score += 0.2;
+  } else if (/(english|eng)/i.test(meta)) {
+    score += 0.6;
+  } else if (/(bengali|tamil|telugu|malayalam|french|russian|spanish|german)/i.test(meta)) {
+    score += 3.0;
+  } else {
+    score += 1.0;
+  }
 
   if (/(cam|hdcam|ts|telesync|hdts)/i.test(meta)) score += 6;
-  if (/(hevc|x265|h265|\.mkv)/i.test(meta)) score += 1.5;
+  if (/(hevc|x265|h265|\.mkv)/i.test(meta) && isRemux) score += 1.5;
   return score;
 }
 
@@ -348,7 +372,8 @@ function mergeResults(lists: StreamSource[][], params: StreamQueryParams): Strea
     for (const s of list) {
       if (!s.url || !matchesEpisodeFilter(s, params)) continue;
       const langKey = (s.audioLanguage || '').trim().toLowerCase();
-      const key = `${s.url}::${langKey}`;
+      const extKey = s.extensionName ? s.extensionName.trim().toLowerCase() : '';
+      const key = extKey ? `${extKey}::${s.url}::${langKey}` : `${s.url}::${langKey}`;
       const existing = deduplicated.get(key);
       if (!existing) {
         let uniqueId = s.id;
@@ -399,7 +424,7 @@ function isLikelyAnimeTitle(params: StreamQueryParams): boolean {
   return false;
 }
 
-class DecoupledStreamProviderService implements IStreamProviderService {
+class DecoupledStreamProviderService implements IFullStreamProviderService {
   private async resolveStreamsInternal(
     params: StreamQueryParams,
     effectiveType: MediaType,
@@ -422,21 +447,25 @@ class DecoupledStreamProviderService implements IStreamProviderService {
     const stremioSources: StreamSource[] = [];
     let customRes: StreamResolutionResult = { sources: [], subtitles: [] };
     let dejavuRes: StreamResolutionResult = { sources: [], subtitles: [] };
-    let anikotoRes: StreamResolutionResult = { sources: [], subtitles: [] };
     let bengaliSources: StreamSource[] = [];
+    let officialEpisodeSources: StreamSource[] = [];
     let settled = false;
 
     const buildSnapshot = (): StreamResolutionResult => {
+      const isBengaliRestricted = isBengaliCandidate || isCustomBengaliOnly;
+      const stripDisallowed = (list: StreamSource[]) =>
+        isBengaliRestricted ? list.filter((s) => s.format !== 'youtube') : list;
+
       const verifiedArchive = archiveSources.map((s) => ({ ...s, isVerified: true }));
       const rawCandidates = mergeResults(
         [
-          verifiedArchive,
-          bengaliSources,
-          nuvioSources,
-          stremioSources,
-          dejavuRes.sources,
-          customRes.sources,
-          anikotoRes.sources,
+          stripDisallowed(verifiedArchive),
+          stripDisallowed(bengaliSources),
+          stripDisallowed(nuvioSources),
+          stripDisallowed(stremioSources),
+          stripDisallowed(officialEpisodeSources),
+          stripDisallowed(dejavuRes.sources),
+          stripDisallowed(customRes.sources),
         ],
         params
       );
@@ -444,13 +473,48 @@ class DecoupledStreamProviderService implements IStreamProviderService {
       let cloudStreamSources: StreamSource[] = [];
       if (toggles.cloudstream !== false && rawCandidates.length > 0) {
         try {
-          cloudStreamSources = cloudStreamProviderResolver.resolveStreams(params, rawCandidates);
+          cloudStreamSources = stripDisallowed(
+            cloudStreamProviderResolver.resolveStreams(params, rawCandidates)
+          );
         } catch {
           cloudStreamSources = [];
         }
       }
 
       const allSources = mergeResults([rawCandidates, cloudStreamSources], params);
+      const hasPlavioStream = allSources.some(
+        (s) =>
+          s.providerName.toLowerCase().includes('plavio') ||
+          s.url.toLowerCase().includes('plavio.site')
+      );
+      if (toggles.plaviohd !== false && !isCustomBengaliOnly && params.title && !hasPlavioStream) {
+        allSources.push({
+          id: `direct-plavio-${params.tmdbId}`,
+          providerName: 'PlavioHD Stream',
+          label: `PlavioHD · ${params.title}`,
+          quality: '1080p FHD',
+          url: `https://hd.plavio.site/search?q=${encodeURIComponent(params.title)}`,
+          format: 'embed',
+          audioLanguage: getDefaultAudioLanguage(params.originalLanguage),
+          note: 'PlavioHD direct web provider option',
+          isDefault: allSources.length === 0,
+          isDirectPlayable: true,
+        });
+      }
+      if (allSources.length === 0 && params.title) {
+        allSources.push({
+          id: `fallback-web-${params.tmdbId}`,
+          providerName: 'KinoStream Web Search',
+          label: `Web Mirror · ${params.title}`,
+          quality: '1080p HD',
+          url: `https://www.google.com/search?q=${encodeURIComponent(params.title + ' watch online streaming')}`,
+          format: 'embed',
+          audioLanguage: getDefaultAudioLanguage(params.originalLanguage),
+          note: 'Direct web watch mirror',
+          isDefault: false,
+          isDirectPlayable: true,
+        });
+      }
       return {
         sources: allSources,
         subtitles: deduplicateSubtitles([
@@ -545,18 +609,6 @@ class DecoupledStreamProviderService implements IStreamProviderService {
             .catch(() => emptyRes)
         : Promise.resolve(emptyRes),
 
-      isLikelyAnimeTitle(params) && !isBengaliCandidate
-        ? (effectiveType === 'tv'
-            ? streamConnector.resolveEpisodeStreams(params)
-            : streamConnector.resolveMovieStreams(params)
-          )
-            .then((res) => {
-              anikotoRes = res;
-              if (res.sources.length > 0) emitProgress();
-            })
-            .catch(() => emptyRes)
-        : Promise.resolve(emptyRes),
-
       toggles.bengali_serials !== false && isBengaliCandidate
         ? bengaliSerialService
             .resolveStreams({
@@ -572,12 +624,39 @@ class DecoupledStreamProviderService implements IStreamProviderService {
             })
             .catch(() => [] as StreamSource[])
         : Promise.resolve([] as StreamSource[]),
+
+      effectiveType === 'tv' &&
+      !isCustomBengaliOnly &&
+      (/\b(c\.?i\.?d\.?|crime\s*patrol|taarak\s*mehta|savdhaan)\b/i.test(params.title) ||
+        params.originalLanguage === 'hi')
+        ? Promise.all([
+            fetch(
+              `/api/youtube/episode?title=${encodeURIComponent(params.title)}&season=${params.seasonNumber || 1}&episode=${params.episodeNumber || 1}`
+            ).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+            fetch(
+              `/api/youtube/episode?title=${encodeURIComponent(params.title)}&season=${params.seasonNumber || 1}&episode=${params.episodeNumber || 1}&lang=bengali`
+            ).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+          ])
+            .then(([hiData, bnData]) => {
+              const combinedSources: StreamSource[] = [];
+              if (Array.isArray(hiData?.sources)) combinedSources.push(...hiData.sources);
+              if (Array.isArray(bnData?.sources)) combinedSources.push(...bnData.sources);
+              if (combinedSources.length > 0) {
+                officialEpisodeSources = combinedSources;
+                emitProgress();
+              }
+            })
+            .catch(() => {})
+        : Promise.resolve(),
     ]);
 
     settled = true;
     const finalResult = buildSnapshot();
 
     if (finalResult.sources.length === 0) {
+      if (isBengaliCandidate || isCustomBengaliOnly) {
+        return finalResult;
+      }
       const trailerSources = await resolveTmdbTrailers(params);
       return {
         sources: mergeResults([trailerSources], params),
@@ -588,10 +667,101 @@ class DecoupledStreamProviderService implements IStreamProviderService {
     return finalResult;
   }
 
+  private sharedJobs = new Map<
+    string,
+    {
+      createdAt: number;
+      latest: StreamResolutionResult;
+      done: boolean;
+      listeners: Set<(result: StreamResolutionResult, isDone: boolean) => void>;
+      promise: Promise<StreamResolutionResult>;
+    }
+  >();
+
+  private getJobKey(params: StreamQueryParams): string {
+    const ep = params.mediaType === 'tv' ? `s${params.seasonNumber || 1}e${params.episodeNumber || 1}` : 'm';
+    return `${params.mediaType}:${params.tmdbId}:${ep}:${params.archiveIdentifier || ''}:${params.dejavuId || ''}:${params.preferredVideoId || ''}`;
+  }
+
+  private getOrStartSharedJob(params: StreamQueryParams) {
+    const key = this.getJobKey(params);
+    const existing = this.sharedJobs.get(key);
+    const ttlMs = existing?.done ? 3 * 60 * 1000 : 45 * 1000;
+    if (existing && Date.now() - existing.createdAt < ttlMs) {
+      return existing;
+    }
+
+    const job = {
+      createdAt: Date.now(),
+      latest: { sources: [], subtitles: [] } as StreamResolutionResult,
+      done: false,
+      listeners: new Set<(result: StreamResolutionResult, isDone: boolean) => void>(),
+      promise: Promise.resolve({ sources: [], subtitles: [] } as StreamResolutionResult),
+    };
+
+    const notify = (res: StreamResolutionResult, isDone: boolean) => {
+      job.latest = res;
+      if (isDone) job.done = true;
+      job.listeners.forEach((cb) => {
+        try {
+          cb(res, isDone);
+        } catch {}
+      });
+    };
+
+    const effectiveType: MediaType = params.mediaType === 'tv' ? 'tv' : 'movie';
+    job.promise = this.resolveStreamsInternal(params, effectiveType, {
+      onProgress: (partial) => notify(partial, false),
+    })
+      .then((finalRes) => {
+        notify(finalRes, true);
+        return finalRes;
+      })
+      .catch(() => {
+        const empty: StreamResolutionResult = { sources: [], subtitles: [] };
+        notify(empty, true);
+        return empty;
+      });
+
+    this.sharedJobs.set(key, job);
+    // Prune stale jobs
+    if (this.sharedJobs.size > 16) {
+      const oldestKey = this.sharedJobs.keys().next().value;
+      if (oldestKey && oldestKey !== key) this.sharedJobs.delete(oldestKey);
+    }
+    return job;
+  }
+
+  clearCache(): void {
+    this.sharedJobs.clear();
+    void nuvioService.clearServerCache();
+  }
+
+  prefetchStreams(params: StreamQueryParams): void {
+    this.getOrStartSharedJob(params);
+  }
+
+  subscribeAndResolveStreams(
+    params: StreamQueryParams,
+    onUpdate: (result: StreamResolutionResult, isDone: boolean) => void
+  ): () => void {
+    const job = this.getOrStartSharedJob(params);
+    job.listeners.add(onUpdate);
+    if (job.latest.sources.length > 0 || job.latest.subtitles.length > 0 || job.done) {
+      onUpdate(job.latest, job.done);
+    }
+    return () => {
+      job.listeners.delete(onUpdate);
+    };
+  }
+
   async resolveMovieStreams(
     params: StreamQueryParams,
     options?: StreamResolveOptions
   ): Promise<StreamResolutionResult> {
+    if (!options?.onProgress) {
+      return this.getOrStartSharedJob(params).promise;
+    }
     return this.resolveStreamsInternal(params, params.mediaType, options);
   }
 
@@ -599,9 +769,13 @@ class DecoupledStreamProviderService implements IStreamProviderService {
     params: StreamQueryParams,
     options?: StreamResolveOptions
   ): Promise<StreamResolutionResult> {
-    return this.resolveStreamsInternal(params, 'tv', options);
+    const normalized = { ...params, mediaType: 'tv' as MediaType };
+    if (!options?.onProgress) {
+      return this.getOrStartSharedJob(normalized).promise;
+    }
+    return this.resolveStreamsInternal(normalized, 'tv', options);
   }
 }
 
-export const streamProviderService: IStreamProviderService =
+export const streamProviderService: IFullStreamProviderService =
   new DecoupledStreamProviderService();

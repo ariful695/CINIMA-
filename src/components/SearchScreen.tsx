@@ -48,6 +48,7 @@ export const SearchScreen: React.FC = () => {
   const [discoverResults, setDiscoverResults] = useState<MediaItem[]>([]);
   const [searchResults, setSearchResults] = useState<MediaItem[]>([]);
   const [people, setPeople] = useState<PersonSearchResult[]>([]);
+  const [isTmdbFallback, setIsTmdbFallback] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const filterBarRef = useRef<HTMLDivElement>(null);
@@ -91,11 +92,11 @@ export const SearchScreen: React.FC = () => {
     };
   }, []);
 
-  // Debounce search query (350ms)
+  // Debounce search query (300ms)
   useEffect(() => {
     const timer = window.setTimeout(() => {
       setDebouncedQuery(query.trim());
-    }, 350);
+    }, 300);
     return () => window.clearTimeout(timer);
   }, [query]);
 
@@ -104,10 +105,11 @@ export const SearchScreen: React.FC = () => {
     if (!debouncedQuery) {
       setSearchResults([]);
       setPeople([]);
+      setIsTmdbFallback(false);
       return;
     }
 
-    let active = true;
+    const controller = new AbortController();
     const runSearch = async () => {
       setLoading(true);
       const [tmdbData, dejavuResults, archiveResults, bengaliResults] = await Promise.all([
@@ -116,25 +118,62 @@ export const SearchScreen: React.FC = () => {
         archiveMovieService.searchArchiveMovies(debouncedQuery),
         bengaliSerialService.search(debouncedQuery),
       ]);
-      if (!active) return;
+      if (controller.signal.aborted) return;
 
+      const taggedBengali = bengaliResults.map((item) => ({
+        ...item,
+        sourceTag: item.sourceTag || ('Bengali Serials' as const),
+      }));
+      const taggedDejavu = dejavuResults.map((item) => ({
+        ...item,
+        sourceTag: item.sourceTag || ('Dejavu' as const),
+      }));
+      const taggedTmdb = tmdbData.moviesAndShows.map((item) => ({
+        ...item,
+        sourceTag:
+          item.sourceTag ||
+          (tmdbData.isFallback ? ('Curated Fallback' as const) : ('TMDB' as const)),
+      }));
+      const taggedArchive = archiveResults.map((item) => ({
+        ...item,
+        sourceTag: item.sourceTag || ('Archive.org' as const),
+      }));
+
+      // Deduplicate by source-specific identifier first so distinct providers never collapse together,
+      // while preventing duplicate curated fallback entries that already match by title & mediaType.
       const mergedMap = new Map<string, MediaItem>();
-      for (const item of [...bengaliResults, ...dejavuResults, ...tmdbData.moviesAndShows, ...archiveResults]) {
-        const key = `${item.mediaType}-${item.title.toLowerCase().trim()}`;
-        if (!mergedMap.has(key)) {
-          mergedMap.set(key, item);
+      const seenTitles = new Set<string>();
+      for (const item of [...taggedBengali, ...taggedDejavu, ...taggedTmdb, ...taggedArchive]) {
+        const titleKey = `${item.mediaType}:${item.title.toLowerCase().trim()}`;
+        const sourceIdKey = item.bengaliSerialSlug
+          ? `bengali:${item.bengaliSerialSlug}`
+          : item.archiveIdentifier
+          ? `archive:${item.archiveIdentifier}`
+          : item.dejavuId
+          ? `dejavu:${item.dejavuId}`
+          : item.sourceTag === 'Curated Fallback'
+          ? `fallback:${titleKey}`
+          : `tmdb:${item.mediaType}:${item.id}`;
+
+        if (item.sourceTag === 'Curated Fallback' && seenTitles.has(titleKey)) {
+          continue;
+        }
+        if (!mergedMap.has(sourceIdKey)) {
+          mergedMap.set(sourceIdKey, item);
+          seenTitles.add(titleKey);
         }
       }
 
       setSearchResults(Array.from(mergedMap.values()));
       setPeople(tmdbData.people);
+      setIsTmdbFallback(Boolean(tmdbData.isFallback));
       storageService.addRecentSearch(debouncedQuery);
       setLoading(false);
     };
 
     void runSearch();
     return () => {
-      active = false;
+      controller.abort();
     };
   }, [debouncedQuery]);
 
@@ -148,7 +187,7 @@ export const SearchScreen: React.FC = () => {
       return;
     }
 
-    let active = true;
+    const controller = new AbortController();
     const runDiscover = async () => {
       setLoading(true);
       const items = await tmdbService.discoverFiltered({
@@ -156,7 +195,7 @@ export const SearchScreen: React.FC = () => {
         genreId: selectedGenreId,
         year: selectedYear,
       });
-      if (active) {
+      if (!controller.signal.aborted) {
         setDiscoverResults(items);
         setLoading(false);
       }
@@ -164,7 +203,7 @@ export const SearchScreen: React.FC = () => {
 
     void runDiscover();
     return () => {
-      active = false;
+      controller.abort();
     };
   }, [debouncedQuery, hasFilters, typeFilter, selectedGenreId, selectedYear]);
 
@@ -450,6 +489,12 @@ export const SearchScreen: React.FC = () => {
           )}
         </div>
 
+        {debouncedQuery && isTmdbFallback && !loading && (
+          <div className="mt-3 rounded-xl bg-amber-500/10 border border-amber-400/25 px-3.5 py-2.5 text-xs text-amber-200 leading-relaxed">
+            Live TMDB search is unavailable right now — showing Curated Fallback matches alongside Archive.org &amp; other active providers.
+          </div>
+        )}
+
         {loading ? (
           <div className="divide-y divide-white/[0.06]">
             {Array.from({ length: 7 }).map((_, idx) => (
@@ -469,11 +514,20 @@ export const SearchScreen: React.FC = () => {
               const rankText = String(idx + 1).padStart(2, '0');
               const yearText = item.releaseDate ? String(item.releaseDate).slice(0, 4) : '';
               const typeText = item.mediaType === 'tv' ? 'Series' : 'Movie';
-              const metaParts = [typeText, yearText, '1080p'].filter(Boolean);
+              const sourceLabel =
+                item.sourceTag ||
+                (item.bengaliSerialSlug
+                  ? 'Bengali Serials'
+                  : item.archiveIdentifier
+                  ? 'Archive.org'
+                  : item.dejavuId
+                  ? 'Dejavu'
+                  : 'TMDB');
+              const metaParts = [typeText, yearText, sourceLabel].filter(Boolean);
 
               return (
                 <button
-                  key={`${item.mediaType}-${item.id}-${idx}`}
+                  key={`${item.mediaType}-${sourceLabel}-${item.id}-${idx}`}
                   type="button"
                   onClick={() => openMediaDetails(item.id, item.mediaType, item)}
                   className="w-full py-3.5 flex items-center gap-3.5 sm:gap-4 text-left hover:bg-white/[0.03] active:bg-white/[0.06] transition-colors rounded-xl px-1 -mx-1"

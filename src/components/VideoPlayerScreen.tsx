@@ -5,6 +5,7 @@ import {
   Captions,
   Check,
   Copy,
+  Download,
   ExternalLink,
   Filter,
   Gauge,
@@ -15,6 +16,7 @@ import {
   Maximize2,
   Minimize,
   Pause,
+  PictureInPicture2,
   Play,
   RefreshCw,
   RotateCcw,
@@ -23,6 +25,7 @@ import {
   SkipBack,
   SkipForward,
   SlidersHorizontal,
+  Smartphone,
   Sun,
   Unlock,
   Users,
@@ -30,11 +33,13 @@ import {
   VolumeX,
   X,
 } from 'lucide-react';
-import { resolveStremioLiveStreamUrl } from '../services/liveTvAddonService';
+import { bengaliSerialService } from '../services/bengaliSerialService';
 import {
   resolveSubtitleTrackUrl,
   streamProviderService,
 } from '../services/streamProviderService';
+import { storageService } from '../services/storageService';
+import { nativeAndroidBridge } from '../services/nativeAndroidBridge';
 import { useAppState } from '../state/AppContext';
 import {
   PlayerSession,
@@ -105,7 +110,7 @@ function extractLangTokens(label?: string): string[] {
   if (!label) return [];
   return label
     .toLowerCase()
-    .replace(/\(.*?\)/g, ' ')
+    .replace(/[()]/g, ' ')
     .split(/[+/|,&]/)
     .map((part) => part.trim())
     .filter(
@@ -116,6 +121,9 @@ function extractLangTokens(label?: string): string[] {
         t !== 'audio' &&
         t !== 'multi-audio' &&
         t !== 'original' &&
+        t !== 'dub' &&
+        t !== 'sub' &&
+        t !== 'track' &&
         !/^\d+\s*more$/.test(t)
     );
 }
@@ -184,9 +192,9 @@ function selectMostCompatibleSource(
 
     // 3. Direct HTTPS or same-origin proxy protocol (prefer instant CDN streams over slower P2P swarm startup)
     if (url.includes('/api/torrent/stream')) {
-      score -= 180;
+      score -= 1800;
     } else if (url.startsWith('/api/') || url.startsWith('https://')) {
-      score += 150;
+      score += 180;
     }
 
     // 4. Penalize slow FFmpeg remux compared to native direct HLS/MP4, and heavily penalize unplayable MKV
@@ -218,6 +226,47 @@ function selectMostCompatibleSource(
     return null;
   }
   return scored[0].source;
+}
+
+function selectBestPlayableSource(
+  sourcesList: StreamSource[],
+  failedSet?: Set<string>,
+  preferredSourceId?: string,
+  allowHeavyFallback = true
+): StreamSource | null {
+  if (!sourcesList || sourcesList.length === 0) return null;
+  if (preferredSourceId) {
+    const exact = sourcesList.find((s) => s.id === preferredSourceId && !failedSet?.has(s.id));
+    if (exact) return exact;
+  }
+  const nonP2pPool = sourcesList.filter(
+    (s) =>
+      !failedSet?.has(s.id) &&
+      !s.url.includes('/api/torrent/stream') &&
+      s.format !== 'youtube' &&
+      s.format !== 'embed'
+  );
+  if (nonP2pPool.length > 0) {
+    return (
+      selectMostCompatibleSource(nonP2pPool, failedSet, 'Hindi', true) ||
+      selectMostCompatibleSource(nonP2pPool, failedSet, 'Hindi', false) ||
+      selectMostCompatibleSource(nonP2pPool, failedSet, undefined, true) ||
+      selectMostCompatibleSource(nonP2pPool, failedSet, undefined, false) ||
+      nonP2pPool[0]
+    );
+  }
+  if (!allowHeavyFallback) {
+    return null;
+  }
+  return (
+    selectMostCompatibleSource(sourcesList, failedSet, 'Hindi', true) ||
+    selectMostCompatibleSource(sourcesList, failedSet, 'Hindi', false) ||
+    selectMostCompatibleSource(sourcesList, failedSet, undefined, true) ||
+    selectMostCompatibleSource(sourcesList, failedSet, undefined, false) ||
+    sourcesList.find((s) => !failedSet?.has(s.id)) ||
+    sourcesList[0] ||
+    null
+  );
 }
 
 const P2PPrebufferHUD: React.FC<{
@@ -260,158 +309,183 @@ const P2PPrebufferHUD: React.FC<{
     return () => cancelAnimationFrame(animId);
   }, [targetPct]);
 
-  const mbPre = ((status?.prebufferedBytes || 0) / (1024 * 1024)).toFixed(1);
-  const mbTarget = ((status?.targetBytes || 2.5 * 1024 * 1024) / (1024 * 1024)).toFixed(1);
+  const targetBytes = status?.targetBytes || 1048576;
+  const prebufferedBytes = status?.prebufferedBytes || 0;
+  const remainingBytes = Math.max(0, targetBytes - prebufferedBytes);
+  const bytesPerSec = Math.max(1, (status?.speedKbps || 0) * 1024);
+  const etaSec =
+    status?.speedKbps && status.speedKbps > 10 ? Math.ceil(remainingBytes / bytesPerSec) : null;
+
+  const mbPre = (prebufferedBytes / (1024 * 1024)).toFixed(1);
+  const mbTarget = (targetBytes / (1024 * 1024)).toFixed(1);
   const speedStr =
     status && status.speedKbps >= 1024
       ? `${(status.speedKbps / 1024).toFixed(1)} MB/s`
       : `${status?.speedKbps || 0} KB/s`;
 
+  const clampedPct = Math.min(100, Math.max(0, displayPct));
+  const ringCircumference = 251.2;
+  const strokeDashoffset = ringCircumference * (1 - clampedPct / 100);
+  const stageLabel = !status?.ready
+    ? 'Connecting to P2P swarm'
+    : !status.headReady
+    ? 'Fetching stream header atom'
+    : 'Pre-buffering initial playback window';
+
   return (
     <div
       onClick={(e) => e.stopPropagation()}
       className="player-interactive absolute inset-0 z-[25] flex items-center justify-center p-4 transition-opacity duration-150"
-      style={{ backgroundColor: 'rgba(5, 7, 11, 0.72)' }}
+      style={{ backgroundColor: 'rgba(5, 7, 12, 0.78)' }}
     >
       <div
-        className="max-w-md w-full rounded-2xl border border-white/15 p-5 sm:p-6 space-y-4 shadow-2xl"
-        style={{ backgroundColor: 'rgba(10, 14, 22, 0.78)' }}
+        className="relative max-w-md w-full rounded-3xl border border-white/15 backdrop-blur-2xl p-5 sm:p-6 space-y-5 shadow-[0_24px_80px_rgba(0,0,0,0.75)] overflow-hidden"
+        style={{ backgroundColor: 'rgba(11, 15, 25, 0.86)' }}
       >
-        {/* Header with Circular Arc Spinner */}
-        <div className="flex items-center gap-3.5">
-          <div className="relative h-10 w-10 shrink-0 flex items-center justify-center">
-            <svg className="h-10 w-10 ks-spin-arc" viewBox="0 0 40 40">
+        <div
+          className="pointer-events-none absolute -top-24 -right-24 h-48 w-48 rounded-full opacity-20 blur-3xl"
+          style={{ backgroundColor: accentHex }}
+        />
+
+        {/* Radial Progress Ring & Source Header */}
+        <div className="relative flex items-center gap-4">
+          <div className="relative h-24 w-24 shrink-0 flex items-center justify-center">
+            <svg className="h-24 w-24 -rotate-90" viewBox="0 0 96 96" aria-hidden="true">
+              <defs>
+                <linearGradient id="p2pHudRingGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                  <stop offset="0%" stopColor={accentHex} />
+                  <stop offset="100%" stopColor="#38BDF8" />
+                </linearGradient>
+              </defs>
               <circle
-                cx="20"
-                cy="20"
-                r="16"
+                cx="48"
+                cy="48"
+                r="40"
                 fill="none"
-                stroke="rgba(255, 255, 255, 0.12)"
-                strokeWidth="3.5"
+                stroke="rgba(255, 255, 255, 0.1)"
+                strokeWidth="6"
               />
               <circle
-                cx="20"
-                cy="20"
-                r="16"
+                cx="48"
+                cy="48"
+                r="40"
                 fill="none"
-                stroke={accentHex}
-                strokeWidth="3.5"
-                strokeDasharray="75 100"
+                stroke="url(#p2pHudRingGradient)"
+                strokeWidth="6"
+                strokeDasharray={ringCircumference}
+                strokeDashoffset={strokeDashoffset}
                 strokeLinecap="round"
               />
             </svg>
-          </div>
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded bg-purple-500/20 text-purple-300 border border-purple-500/30">
-                P2P Swarm Buffer
+            <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+              <span className="text-lg font-bold font-mono-tabular text-white leading-none">
+                {Math.round(clampedPct)}%
               </span>
-              <span className="text-xs text-slate-400 font-mono-tabular">
+              <span className="text-[11px] font-mono-tabular text-slate-400 mt-1">
+                {mbPre} MB
+              </span>
+            </div>
+          </div>
+
+          <div className="min-w-0 flex-1 space-y-1">
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-md bg-white/[0.08] text-sky-300 border border-sky-400/25">
+                P2P Stream
+              </span>
+              <span className="text-xs text-slate-300 font-mono-tabular">
                 {activeSource.quality || 'Auto'}
               </span>
             </div>
-            <h3 className="text-sm sm:text-base font-bold text-white truncate mt-1">
+            <h3 className="text-base sm:text-lg font-bold text-white truncate">
               {activeSource.providerName}
             </h3>
-            <p className="text-xs text-slate-400 truncate">
+            <p className="text-xs text-slate-300 truncate">
               {status?.fileName || activeSource.label}
             </p>
+            <p className="text-xs text-slate-400 truncate">{stageLabel}</p>
           </div>
         </div>
 
-        {/* 60fps Smooth Lerp Progress Bar */}
-        <div className="space-y-1.5 pt-1">
-          <div className="flex items-center justify-between text-[11px] font-mono-tabular text-slate-300">
-            <span>
-              {!status?.ready
-                ? 'Connecting to swarm...'
-                : !status.headReady
-                ? 'Buffering stream header...'
-                : 'Sequential pre-buffering...'}
-            </span>
-            <span className="font-bold text-white">{Math.round(displayPct)}%</span>
+        {/* Live Speed & ETA Telemetry Bar */}
+        <div className="flex items-center justify-between gap-3 rounded-2xl bg-white/[0.05] border border-white/10 px-4 py-2.5 text-xs font-mono-tabular">
+          <div className="flex items-center gap-2 text-slate-200">
+            <Gauge className="h-4 w-4 text-sky-400 shrink-0" />
+            <span className="font-semibold">{speedStr}</span>
           </div>
-          <div className="w-full h-2 rounded-full bg-white/10 overflow-hidden">
-            <div
-              className="h-full rounded-full transition-none"
-              style={{
-                width: `${Math.min(100, Math.max(3, displayPct))}%`,
-                backgroundColor: accentHex,
-              }}
-            />
+          <div className="text-slate-400">
+            {mbPre} / {mbTarget} MB
           </div>
-          <div className="flex items-center justify-between text-[11px] font-mono-tabular text-slate-400">
-            <span>
-              {mbPre} / {mbTarget} MB
-            </span>
-            <span className="text-slate-200 font-semibold">{speedStr}</span>
+          <div className="font-semibold text-emerald-300">
+            {etaSec !== null ? `~${etaSec}s left` : 'Syncing...'}
           </div>
         </div>
 
-        {/* Swarm Metrics Grid */}
-        <div className="grid grid-cols-4 gap-2 text-center pt-1">
-          <div className="rounded-xl bg-white/[0.05] border border-white/10 py-2 px-1">
-            <div className="text-xs sm:text-sm font-bold font-mono-tabular text-white">
+        {/* Swarm Metrics */}
+        <div className="grid grid-cols-4 gap-2 text-center">
+          <div className="rounded-xl bg-white/[0.04] border border-white/10 py-2.5 px-1">
+            <div className="text-sm font-bold font-mono-tabular text-white">
               {status?.peers ?? 0}
             </div>
-            <div className="text-[10px] text-slate-400 mt-0.5">Peers</div>
+            <div className="text-[11px] text-slate-400 mt-0.5">Peers</div>
           </div>
-          <div className="rounded-xl bg-white/[0.05] border border-white/10 py-2 px-1">
-            <div className="text-xs sm:text-sm font-bold font-mono-tabular text-emerald-400">
+          <div className="rounded-xl bg-white/[0.04] border border-white/10 py-2.5 px-1">
+            <div className="text-sm font-bold font-mono-tabular text-emerald-400">
               {status?.seeders ?? 0}
             </div>
-            <div className="text-[10px] text-slate-400 mt-0.5">Seeds</div>
+            <div className="text-[11px] text-slate-400 mt-0.5">Seeds</div>
           </div>
-          <div className="rounded-xl bg-white/[0.05] border border-white/10 py-2 px-1">
+          <div className="rounded-xl bg-white/[0.04] border border-white/10 py-2.5 px-1">
             <div
-              className={`text-xs sm:text-sm font-bold ${
-                status?.headReady ? 'text-emerald-400' : 'text-amber-400'
+              className={`text-sm font-bold ${
+                status?.headReady ? 'text-emerald-400' : 'text-amber-300'
               }`}
             >
               {status?.headReady ? 'Ready' : 'Wait'}
             </div>
-            <div className="text-[10px] text-slate-400 mt-0.5">Header</div>
+            <div className="text-[11px] text-slate-400 mt-0.5">Header</div>
           </div>
-          <div className="rounded-xl bg-white/[0.05] border border-white/10 py-2 px-1">
+          <div className="rounded-xl bg-white/[0.04] border border-white/10 py-2.5 px-1">
             <div
-              className={`text-xs sm:text-sm font-bold ${
-                status?.tailReady ? 'text-emerald-400' : 'text-slate-400'
+              className={`text-sm font-bold ${
+                status?.tailReady ? 'text-emerald-400' : 'text-slate-300'
               }`}
             >
               {status?.tailReady ? 'Ready' : 'Wait'}
             </div>
-            <div className="text-[10px] text-slate-400 mt-0.5">End Meta</div>
+            <div className="text-[11px] text-slate-400 mt-0.5">Index</div>
           </div>
         </div>
 
-        {/* Action Controls */}
-        <div className="flex flex-wrap items-center justify-end gap-2.5 pt-2 border-t border-white/10">
+        {/* Action Controls (44px+ Touch Targets) */}
+        <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-2 border-t border-white/10">
           <button
             type="button"
             onClick={onCancel}
-            className="min-h-[40px] px-4 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-semibold text-slate-200 transition-colors"
+            className="min-h-[44px] px-4 rounded-xl bg-white/[0.07] hover:bg-white/[0.15] text-xs font-semibold text-slate-200 transition-colors"
           >
             Cancel
           </button>
-          {hasAlternativeSources && onSwitchServer && (
+          <div className="flex items-center gap-2 flex-1 sm:flex-initial justify-end">
+            {hasAlternativeSources && onSwitchServer && (
+              <button
+                type="button"
+                onClick={onSwitchServer}
+                className="min-h-[44px] flex-1 sm:flex-initial px-4 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 transition-colors"
+              >
+                <Server className="h-4 w-4" />
+                <span>Switch Server</span>
+              </button>
+            )}
             <button
               type="button"
-              onClick={onSwitchServer}
-              className="min-h-[40px] px-4 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
+              onClick={onContinueAnyway}
+              className="min-h-[44px] flex-1 sm:flex-initial px-5 rounded-xl text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 shadow-lg active:scale-95 transition-transform"
+              style={{ backgroundColor: accentHex }}
             >
-              <Server className="h-3.5 w-3.5" />
-              <span>Switch Server</span>
+              <Play className="h-4 w-4 fill-current" />
+              <span>Play Now</span>
             </button>
-          )}
-          <button
-            type="button"
-            onClick={onContinueAnyway}
-            className="min-h-[40px] px-4 rounded-xl text-xs font-semibold text-white inline-flex items-center gap-1.5 shadow-lg active:scale-95 transition-transform"
-            style={{ backgroundColor: accentHex }}
-          >
-            <Play className="h-3.5 w-3.5 fill-current" />
-            <span>Continue Anyway</span>
-          </button>
+          </div>
         </div>
       </div>
     </div>
@@ -440,10 +514,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   const playPromiseRef = useRef<Promise<void> | null>(null);
   const failedSourceIdsRef = useRef<Set<string>>(new Set());
   const userLockedLanguageRef = useRef<boolean>(false);
+  const userSelectedSourceRef = useRef<boolean>(false);
+  const hasPlayedFramesRef = useRef<boolean>(false);
   const p2pBypassForSourceRef = useRef<string | null>(null);
+  const mountGenRef = useRef<number>(0);
+  const resumePositionRef = useRef<number>(
+    session.initialTime && session.initialTime > 3 ? session.initialTime : 0
+  );
+  const lastUiTimeUpdateRef = useRef<number>(0);
 
   const [sources, setSources] = useState<StreamSource[]>([]);
   const [activeSource, setActiveSource] = useState<StreamSource | null>(null);
+  const activeSourceRef = useRef<StreamSource | null>(null);
+  useEffect(() => {
+    activeSourceRef.current = activeSource;
+  }, [activeSource]);
+
   const [subtitles, setSubtitles] = useState<SubtitleTrack[]>([]);
   const [resolvedSubUrls, setResolvedSubUrls] = useState<Record<string, string>>({});
   const [activeSubtitleId, setActiveSubtitleId] = useState<string>('off');
@@ -460,7 +546,12 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const [isPlaying, setIsPlaying] = useState(true);
   const [isBuffering, setIsBuffering] = useState(true);
+  const [isResolvingStreams, setIsResolvingStreams] = useState(session.mediaType !== 'live');
+  const [showUnmutePrompt, setShowUnmutePrompt] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
+  const [liveSwitchToast, setLiveSwitchToast] = useState<string | null>(null);
+  const [activeLiveFeedIdx, setActiveLiveFeedIdx] = useState(0);
+  const failedLiveUrlsRef = useRef<Set<string>>(new Set());
   const [currentTime, setCurrentTime] = useState(session.initialTime || 0);
   const [seekPreviewTime, setSeekPreviewTime] = useState<number | null>(null);
   const [duration, setDuration] = useState(0);
@@ -501,6 +592,19 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const isLive = session.mediaType === 'live';
 
+  const liveFeedsList = useMemo(() => {
+    if (!isLive || !session.liveChannel) return [];
+    const seen = new Set<string>();
+    const list = [session.liveChannel, ...(session.fallbackFeeds || [])].filter((ch) => {
+      if (!ch?.streamUrl) return false;
+      const key = ch.streamUrl.trim();
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    return list;
+  }, [isLive, session.liveChannel, session.fallbackFeeds]);
+
   const playbackRateRef = useRef(playbackRate);
   const isMutedRef = useRef(isMuted);
   const volumeRef = useRef(volume);
@@ -514,15 +618,39 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   }, [playbackRate, isMuted, volume]);
 
   useEffect(() => {
-    seekOffsetSecondsRef.current = 0;
+    let parsedSs = 0;
+    if (activeSource?.url) {
+      try {
+        const u = new URL(activeSource.url, window.location.origin);
+        const ssVal = Number(u.searchParams.get('ss') || '0');
+        if (Number.isFinite(ssVal) && ssVal > 0) {
+          parsedSs = Math.floor(ssVal);
+        }
+      } catch {
+        // Ignore relative/malformed URL parsing
+      }
+    }
+    seekOffsetSecondsRef.current = parsedSs;
+
     const initialDur =
       session.runtimeMinutes && session.runtimeMinutes > 0 ? session.runtimeMinutes * 60 : 0;
     setProbedDurationSeconds(initialDur);
     if (initialDur > 0) setDuration(initialDur);
 
-    if (activeSource?.url && !isLive) {
+    if (activeSource?.url && !isLive && activeSource.format !== 'hls' && !activeSource.url.includes('remux=1')) {
+      let probeActive = true;
       fetch(activeSource.url, { method: 'HEAD' })
         .then((res) => {
+          if (!probeActive) return;
+          const ct = (res.headers.get('content-type') || '').toLowerCase();
+          if (ct.includes('mpegurl') || ct.includes('m3u8')) {
+            setActiveSource((prev) =>
+              prev && prev.id === activeSource.id && prev.format !== 'hls'
+                ? { ...prev, format: 'hls' }
+                : prev
+            );
+            return;
+          }
           const hdr = res.headers.get('x-content-duration');
           if (hdr) {
             const parsed = parseFloat(hdr);
@@ -533,8 +661,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           }
         })
         .catch(() => {});
+      return () => {
+        probeActive = false;
+      };
     }
-  }, [activeSource?.url, isLive, session.runtimeMinutes]);
+  }, [activeSource?.id, activeSource?.url, activeSource?.format, isLive, session.runtimeMinutes]);
 
   const effectiveDuration =
     Number.isFinite(duration) && duration > 0
@@ -579,222 +710,192 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     [isLive, liveChannels, session.liveChannel, channelHealthMap, startPlayback]
   );
 
-  // Resolve stream sources & subtitles on mount
+  // Reset live backup tracking & resume position only when session identity changes
+  const sessionKey = `${session.mediaType}-${session.mediaId}-${session.seasonNumber || 0}-${session.episodeNumber || 0}-${session.liveChannel?.id || ''}`;
+  useEffect(() => {
+    resumePositionRef.current =
+      session.initialTime && session.initialTime > 3 ? session.initialTime : 0;
+    setCurrentTime(resumePositionRef.current);
+    setActiveLiveFeedIdx(0);
+    failedLiveUrlsRef.current.clear();
+    setLiveSwitchToast(null);
+  }, [sessionKey, session.initialTime]);
+
+  // Activate selected Live TV channel or backup feed cleanly
+  useEffect(() => {
+    if (!isLive || !session.liveChannel) return;
+    const ch = liveFeedsList[activeLiveFeedIdx] || session.liveChannel;
+    let playUrl = ch.streamUrl;
+    if (
+      (playUrl.startsWith('http://') || playUrl.startsWith('https://')) &&
+      !playUrl.startsWith('/api/')
+    ) {
+      playUrl = `/api/stream-proxy?url=${encodeURIComponent(playUrl)}`;
+    }
+    const liveSrc: StreamSource = {
+      id: `${ch.id}-feed-${activeLiveFeedIdx}`,
+      providerName: ch.playlistName,
+      label: `${ch.name} · Live HLS${liveFeedsList.length > 1 ? ` (Feed ${activeLiveFeedIdx + 1}/${liveFeedsList.length})` : ''}`,
+      quality: 'Auto (Live)',
+      url: playUrl,
+      format: playUrl.includes('.mp4') ? 'mp4' : 'hls',
+      isVerified: true,
+    };
+    setSources([liveSrc]);
+    setActiveSource(liveSrc);
+    setSubtitles([]);
+  }, [isLive, session.liveChannel, liveFeedsList, activeLiveFeedIdx]);
+
+  const isBengaliSession = useMemo(
+    () =>
+      bengaliSerialService.isBengaliSerialOrCartoon({
+        title: session.title,
+        originalLanguage: session.originalLanguage,
+        bengaliSerialSlug: session.bengaliSerialSlug,
+      }) || (session.mediaId >= 895000 && session.mediaId <= 899999),
+    [session.title, session.originalLanguage, session.bengaliSerialSlug, session.mediaId]
+  );
+
+  // Resolve stream sources & subtitles progressively via shared subscription
   useEffect(() => {
     failedSourceIdsRef.current.clear();
     userLockedLanguageRef.current = false;
+    userSelectedSourceRef.current = Boolean(session.preferredSourceId);
+    hasPlayedFramesRef.current = false;
     p2pBypassForSourceRef.current = null;
+    setIsResolvingStreams(!isLive);
+    setShowUnmutePrompt(false);
+    setStreamError(null);
+    setIsBuffering(true);
     setDrawerTypeFilter('all');
     setDrawerProviderFilter('All');
     setDrawerLanguageFilter('All');
     setDrawerQualityFilter('all');
+
     let active = true;
-    const init = async () => {
-      if (isLive && session.liveChannel) {
-        const ch = session.liveChannel;
-        let candidateSources: StreamSource[] = [];
+    const resolvedSubIdsSeen = new Set<string>();
 
-        const isJsonEndpoint =
-          ch.streamUrl.includes('.json') ||
-          ch.streamUrl.includes('/stream/tv/') ||
-          ch.streamUrl.includes('/stream/sport/');
+    const syncSubtitles = async (subs: SubtitleTrack[]) => {
+      setSubtitles(subs);
+      const missing = subs.filter((s) => !resolvedSubIdsSeen.has(s.id));
+      if (missing.length === 0) return;
+      missing.forEach((s) => resolvedSubIdsSeen.add(s.id));
+      const urlMap: Record<string, string> = {};
+      await Promise.allSettled(
+        missing.map(async (sub) => {
+          urlMap[sub.id] = await resolveSubtitleTrackUrl(sub);
+        })
+      );
+      if (active && Object.keys(urlMap).length > 0) {
+        setResolvedSubUrls((prev) => ({ ...prev, ...urlMap }));
+      }
+    };
 
-        if (isJsonEndpoint) {
-          const fetchTarget = ch.streamUrl.startsWith('/api/')
-            ? ch.streamUrl
-            : `/api/proxy?url=${encodeURIComponent(ch.streamUrl)}`;
-          const controller = new AbortController();
-          const timer = window.setTimeout(() => controller.abort(), 6000);
-          try {
-            const res = await fetch(fetchTarget, { signal: controller.signal });
-            if (res.ok) {
-              const data = (await res.json()) as {
-                streams?: Array<{
-                  url?: string;
-                  externalUrl?: string;
-                  title?: string;
-                  name?: string;
-                  behaviorHints?: {
-                    proxyHeaders?: { request?: Record<string, string> };
-                    headers?: Record<string, string>;
-                  };
-                }>;
-              };
-              if (Array.isArray(data.streams) && data.streams.length > 0) {
-                candidateSources = data.streams
-                  .filter((s) => Boolean(s.url || s.externalUrl))
-                  .map((s, idx) => {
-                    const raw = s.url || s.externalUrl || '';
-                    const reqHeaders =
-                      s.behaviorHints?.proxyHeaders?.request || s.behaviorHints?.headers;
-                    let target = raw;
-                    if (!raw.startsWith('/api/')) {
-                      let hParam = '';
-                      if (reqHeaders && Object.keys(reqHeaders).length > 0) {
-                        try {
-                          hParam = btoa(JSON.stringify(reqHeaders))
-                            .replace(/\+/g, '-')
-                            .replace(/\//g, '_')
-                            .replace(/=+$/, '');
-                        } catch {}
-                      }
-                      target = `/api/stream-proxy?url=${encodeURIComponent(raw)}${hParam ? `&h=${encodeURIComponent(hParam)}` : ''}`;
-                    }
-                    return {
-                      id: `${ch.id}-src-${idx}`,
-                      providerName: s.name || ch.playlistName,
-                      label: `${ch.name} · ${s.title ? s.title.split('\n')[0] : `Server ${idx + 1}`}`,
-                      quality: s.title?.match(/\b(1080p|720p|480p|4k)\b/i)?.[0] || 'Auto (Live)',
-                      url: target,
-                      format: (raw.includes('.mp4') ? 'mp4' : 'hls') as 'mp4' | 'hls',
-                      isVerified: true,
-                    };
-                  });
-              }
-            }
-          } catch (err) {
-            console.warn('Failed to resolve Stremio live stream endpoint', err);
-          } finally {
-            window.clearTimeout(timer);
-          }
+    if (isLive && session.liveChannel) {
+      return () => {
+        active = false;
+      };
+    }
 
-          if (candidateSources.length === 0) {
-            const unwrappedUrl = await resolveStremioLiveStreamUrl(fetchTarget);
-            if (unwrappedUrl && !unwrappedUrl.includes('/stream/')) {
-              const finalTarget = unwrappedUrl.startsWith('/api/')
-                ? unwrappedUrl
-                : `/api/stream-proxy?url=${encodeURIComponent(unwrappedUrl)}`;
-              candidateSources = [
-                {
-                  id: `${ch.id}-unwrapped`,
-                  providerName: ch.playlistName,
-                  label: `${ch.name} · Live Stream`,
-                  quality: 'Auto (Live)',
-                  url: finalTarget,
-                  format: unwrappedUrl.includes('.mp4') ? 'mp4' : 'hls',
-                  isVerified: true,
-                },
-              ];
-            }
-          }
-        }
+    const applySnapshot = (
+      nextSources: StreamSource[],
+      nextSubs: SubtitleTrack[],
+      isDone: boolean
+    ) => {
+      if (!active) return;
+      if (isDone) {
+        setIsResolvingStreams(false);
+      }
+      const preferredOverride = session.preferredSourceId
+        ? session.initialSources?.find((s) => s.id === session.preferredSourceId)
+        : undefined;
+      const mergedIncoming = preferredOverride
+        ? nextSources.map((s) => (s.id === preferredOverride.id ? preferredOverride : s))
+        : nextSources;
 
-        if (candidateSources.length === 0 && !isJsonEndpoint) {
-          let playUrl = ch.streamUrl;
-          if (
-            (playUrl.startsWith('http://') || playUrl.startsWith('https://')) &&
-            !playUrl.startsWith('/api/')
-          ) {
-            playUrl = `/api/stream-proxy?url=${encodeURIComponent(playUrl)}`;
-          }
-          const liveSrc: StreamSource = {
-            id: ch.id,
-            providerName: ch.playlistName,
-            label: `${ch.name} · Live HLS`,
-            quality: 'Auto (Live)',
-            url: playUrl,
-            format: playUrl.includes('.mp4') ? 'mp4' : 'hls',
-            isVerified: true,
-          };
-          candidateSources = [liveSrc];
-        }
+      const allowedSources = isBengaliSession
+        ? mergedIncoming.filter((s) => s.format !== 'youtube')
+        : mergedIncoming;
 
-        if (!active) return;
-        setSources(candidateSources);
-        setActiveSource(candidateSources[0]);
-        setSubtitles([]);
-        return;
+      if (allowedSources.length > 0) {
+        setSources(allowedSources);
+      } else if (isDone && isBengaliSession) {
+        setSources([]);
+      }
+      if (nextSubs.length > 0) {
+        void syncSubtitles(nextSubs);
       }
 
-      if (session.initialSources && session.initialSources.length > 0) {
-        if (!active) return;
-        setSources(session.initialSources);
-        const preferred =
-          (session.preferredSourceId
-            ? session.initialSources.find((s) => s.id === session.preferredSourceId)
-            : null) ||
-          selectMostCompatibleSource(session.initialSources) ||
-          session.initialSources[0] ||
-          null;
-        setActiveSource(preferred);
-        const initSubs = session.initialSubtitles || [];
-        setSubtitles(initSubs);
-        if (initSubs.length > 0) {
-          const urlMap: Record<string, string> = {};
-          await Promise.all(
-            initSubs.map(async (sub) => {
-              urlMap[sub.id] = await resolveSubtitleTrackUrl(sub);
-            })
+      const currentActive = activeSourceRef.current;
+      const bestNow = selectBestPlayableSource(
+        allowedSources,
+        failedSourceIdsRef.current,
+        session.preferredSourceId,
+        isDone
+      );
+
+      if (!currentActive || (isBengaliSession && currentActive.format === 'youtube')) {
+        if (bestNow) {
+          setActiveSource(bestNow);
+        } else if (isDone) {
+          if (isBengaliSession) {
+            setActiveSource(null);
+          }
+          setIsBuffering(false);
+          setStreamError(
+            isBengaliSession
+              ? 'No Bengali serial stream provider is available (YouTube playback disabled).'
+              : 'No playable stream servers were found for this title.'
           );
-          if (active) setResolvedSubUrls(urlMap);
         }
-        return;
-      }
+      } else if (!userSelectedSourceRef.current && !hasPlayedFramesRef.current && bestNow) {
+        const curIsP2POrEmbed =
+          currentActive.url.includes('/api/torrent/stream') ||
+          currentActive.format === 'embed' ||
+          currentActive.format === 'youtube';
+        const bestIsDirect =
+          !bestNow.url.includes('/api/torrent/stream') &&
+          bestNow.format !== 'embed' &&
+          bestNow.format !== 'youtube';
+        const curIsHindi = /\b(hindi|hin)\b|🇮🇳/i.test(currentActive.audioLanguage || '');
+        const bestIsHindi = /\b(hindi|hin)\b|🇮🇳/i.test(bestNow.audioLanguage || '');
 
-      try {
-        const resolved =
-          session.mediaType === 'tv'
-            ? await streamProviderService.resolveEpisodeStreams({
-                tmdbId: session.mediaId,
-                imdbId: session.imdbId,
-                dejavuId: session.dejavuId,
-                archiveIdentifier: session.archiveIdentifier,
-                mediaType: 'tv',
-                title: session.title,
-                genreIds: session.genreIds,
-                originalLanguage: session.originalLanguage,
-                releaseYear: session.releaseYear,
-                seasonNumber: session.seasonNumber,
-                episodeNumber: session.episodeNumber,
-              })
-            : await streamProviderService.resolveMovieStreams({
-                tmdbId: session.mediaId,
-                imdbId: session.imdbId,
-                dejavuId: session.dejavuId,
-                archiveIdentifier: session.archiveIdentifier,
-                mediaType: 'movie',
-                title: session.title,
-                genreIds: session.genreIds,
-                originalLanguage: session.originalLanguage,
-                releaseYear: session.releaseYear,
-              });
-
-        if (!active) return;
-        setSources(resolved.sources);
-        const preferred =
-          (session.preferredSourceId
-            ? resolved.sources.find((s) => s.id === session.preferredSourceId)
-            : null) ||
-          selectMostCompatibleSource(resolved.sources) ||
-          resolved.sources[0] ||
-          null;
-        setActiveSource(preferred);
-        setSubtitles(resolved.subtitles);
-        if (!preferred) {
-          setIsBuffering(false);
-          setStreamError('No playable stream servers were found for this title.');
-        }
-
-        const urlMap: Record<string, string> = {};
-        await Promise.allSettled(
-          resolved.subtitles.map(async (sub) => {
-            urlMap[sub.id] = await resolveSubtitleTrackUrl(sub);
-          })
-        );
-        if (active) setResolvedSubUrls(urlMap);
-      } catch {
-        if (active) {
-          setIsBuffering(false);
-          setStreamError('Failed to resolve playable stream servers.');
+        if ((curIsP2POrEmbed && bestIsDirect) || (!curIsHindi && bestIsHindi && bestIsDirect)) {
+          setActiveSource(bestNow);
         }
       }
     };
 
-    void init();
+    if (session.initialSources && session.initialSources.length > 0) {
+      applySnapshot(session.initialSources, session.initialSubtitles || [], false);
+    }
+
+    const unsubscribe = streamProviderService.subscribeAndResolveStreams(
+      {
+        tmdbId: session.mediaId,
+        imdbId: session.imdbId,
+        dejavuId: session.dejavuId,
+        archiveIdentifier: session.archiveIdentifier,
+        mediaType: session.mediaType === 'tv' ? 'tv' : 'movie',
+        title: session.title,
+        genreIds: session.genreIds,
+        originalLanguage: session.originalLanguage,
+        releaseYear: session.releaseYear,
+        seasonNumber: session.seasonNumber,
+        episodeNumber: session.episodeNumber,
+        bengaliSerialSlug: session.bengaliSerialSlug,
+        preferredVideoId: session.preferredVideoId,
+      },
+      (result, isDone) => {
+        applySnapshot(result.sources, result.subtitles, isDone);
+      }
+    );
+
     return () => {
       active = false;
+      unsubscribe();
     };
-  }, [session, isLive]);
+  }, [session, isLive, isBengaliSession]);
 
   // Persist watch progress helper
   const persistProgress = useCallback(
@@ -836,6 +937,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       if (err instanceof DOMException && err.name === 'AbortError') {
         return;
       }
+      if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'NotSupportedError')) {
+        try {
+          video.muted = true;
+          isMutedRef.current = true;
+          setIsMuted(true);
+          setShowUnmutePrompt(true);
+          const mutedPromise = video.play();
+          playPromiseRef.current = mutedPromise;
+          await mutedPromise;
+          setIsPlaying(true);
+          setIsBuffering(false);
+          return;
+        } catch {
+          // Fall through if even muted playback is disallowed
+        }
+      }
       setIsPlaying(false);
       setIsBuffering(false);
     } finally {
@@ -872,21 +989,47 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   const handlePlaybackFailure = useCallback(
     (source: StreamSource | null, errorMsg: string) => {
       if (isLive && session.liveChannel) {
-        markChannelHealth(session.liveChannel.id, false);
+        const currentCh = liveFeedsList[activeLiveFeedIdx] || session.liveChannel;
+        markChannelHealth(currentCh.id, false);
+        failedLiveUrlsRef.current.add(currentCh.streamUrl);
+
+        if (liveFeedsList.length > 1) {
+          const nextIdx = liveFeedsList.findIndex(
+            (feed, idx) => idx !== activeLiveFeedIdx && !failedLiveUrlsRef.current.has(feed.streamUrl)
+          );
+          if (nextIdx >= 0) {
+            setLiveSwitchToast(
+              `Feed ${activeLiveFeedIdx + 1} unavailable · Switching to backup feed ${nextIdx + 1}...`
+            );
+            window.setTimeout(() => setLiveSwitchToast(null), 2400);
+            setActiveLiveFeedIdx(nextIdx);
+            return;
+          }
+        }
       }
       if (source && !isLive) {
         failedSourceIdsRef.current.add(source.id);
-        const pool = sourcesRef.current;
-        if (failedSourceIdsRef.current.size < 5 && pool.length > 1) {
-          const targetLang = source.audioLanguage;
-          // Try matching language first; if exhausted and language wasn't manually locked, fall back to best playable mirror
-          const sameLangFallback = targetLang
-            ? selectMostCompatibleSource(pool, failedSourceIdsRef.current, targetLang, true)
+        const pool = isBengaliSession
+          ? sourcesRef.current.filter((s) => s.format !== 'youtube')
+          : sourcesRef.current;
+        const maxAttempts = Math.min(24, Math.max(1, pool.length));
+        if (failedSourceIdsRef.current.size < maxAttempts && pool.length > 0) {
+          const activeLang =
+            source.audioLanguage && source.audioLanguage !== 'Original'
+              ? source.audioLanguage
+              : userLockedLanguageRef.current
+              ? source.audioLanguage
+              : 'Hindi';
+          const sameLangFallback = activeLang
+            ? selectMostCompatibleSource(pool, failedSourceIdsRef.current, activeLang, true) ||
+              selectMostCompatibleSource(pool, failedSourceIdsRef.current, activeLang, false)
             : null;
           const anyLangFallback =
             sameLangFallback ||
-            (!userLockedLanguageRef.current
-              ? selectMostCompatibleSource(pool, failedSourceIdsRef.current, undefined, true)
+            (!userLockedLanguageRef.current &&
+            (!source.audioLanguage || source.audioLanguage === 'Original')
+              ? selectMostCompatibleSource(pool, failedSourceIdsRef.current, undefined, true) ||
+                selectMostCompatibleSource(pool, failedSourceIdsRef.current, undefined, false)
               : null);
           if (anyLangFallback && anyLangFallback.id !== source.id) {
             setActiveSource(anyLangFallback);
@@ -894,10 +1037,14 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           }
         }
       }
-      setStreamError(errorMsg);
+      setStreamError(
+        isBengaliSession
+          ? 'No Bengali serial stream provider is available (YouTube playback disabled).'
+          : errorMsg
+      );
       setIsBuffering(false);
     },
-    [isLive, session.liveChannel, markChannelHealth]
+    [isLive, isBengaliSession, session.liveChannel, liveFeedsList, activeLiveFeedIdx, markChannelHealth]
   );
 
   // P2P Torrent preparation + sequential pre-buffering status polling before attaching <video>
@@ -931,7 +1078,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     const season = parsedUrl.searchParams.get('season');
     const episode = parsedUrl.searchParams.get('episode');
     const tr = parsedUrl.searchParams.get('tr');
-    const prebufferMb = Number(parsedUrl.searchParams.get('prebufferMb') || 10);
+    const prebufferMb = Number(parsedUrl.searchParams.get('prebufferMb') || 5);
 
     if (!infoHash) {
       setP2pAttachUrl(activeSource.url);
@@ -958,7 +1105,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       speedKbps: 0,
       prebufferMb,
       prebufferedBytes: 0,
-      targetBytes: Math.max(5, Math.min(30, prebufferMb)) * 1024 * 1024,
+      targetBytes: Math.max(2, Math.min(30, prebufferMb)) * 1024 * 1024,
       headReady: false,
       tailReady: false,
       progressPct: 0,
@@ -992,9 +1139,25 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         if (cancelled) return;
         setP2pStatus(data);
         const elapsedMs = Date.now() - startTimeMs;
-        if (data.readyToPlay || (data.headReady && elapsedMs >= 15000)) {
+        const hasDirectMirrors = sourcesRef.current.some(
+          (s) => !s.url.includes('/api/torrent/stream') && !failedSourceIdsRef.current.has(s.id)
+        );
+        if (
+          data.readyToPlay ||
+          (data.headReady && (data.prebufferedBytes >= 1024 * 1024 || elapsedMs >= 3500))
+        ) {
           stopTimers();
           setP2pAttachUrl(activeSource.url);
+          return;
+        }
+        // Fail fast if swarm has zero reachable peers and alternative direct servers exist
+        if (elapsedMs >= 4500 && data.peers === 0 && hasDirectMirrors) {
+          stopTimers();
+          controller.abort();
+          handlePlaybackFailure(
+            activeSource,
+            'No P2P peers found. Switching to instant direct server.'
+          );
         }
       } catch {
         // Ignore transient status poll aborts
@@ -1011,9 +1174,9 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       controller.abort();
       handlePlaybackFailure(
         activeSource,
-        'P2P torrent swarm has too few peers or timed out while pre-buffering. Click Continue to switch servers or Continue Anyway in a lower buffer.'
+        'P2P torrent swarm has too few peers or timed out while pre-buffering. Click Play Now or switch to a direct server.'
       );
-    }, 45000);
+    }, 15000);
 
     const runPrepare = async () => {
       try {
@@ -1037,7 +1200,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         if (cancelled) return;
         setP2pStatus(data);
         const elapsedMs = Date.now() - startTimeMs;
-        if (data.readyToPlay || (data.headReady && elapsedMs >= 15000)) {
+        if (
+          data.readyToPlay ||
+          (data.headReady && (data.prebufferedBytes >= 1024 * 1024 || elapsedMs >= 3500))
+        ) {
           stopTimers();
           setP2pAttachUrl(activeSource.url);
         }
@@ -1084,6 +1250,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     }
 
     let cancelled = false;
+    const myGen = ++mountGenRef.current;
     let startupStallTimer: number | null = null;
     setStreamError(null);
     setIsBuffering(true);
@@ -1097,7 +1264,9 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       hlsRef.current = null;
     }
 
-    const startTime = session.initialTime && session.initialTime > 3 ? session.initialTime : 0;
+    const hasServerSeekParam = /[?&]ss=\d+/i.test(activeSource.url);
+    const startTime =
+      !hasServerSeekParam && resumePositionRef.current > 3 ? resumePositionRef.current : 0;
 
     const clearStallTimer = () => {
       if (startupStallTimer !== null) {
@@ -1140,12 +1309,33 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         video.currentTime = startTime;
       }
       video.playbackRate = playbackRateRef.current;
+      video.muted = isMutedRef.current;
       video.volume = isMutedRef.current ? 0 : volumeRef.current;
       if (!hlsActiveRef.current) {
         syncNativeAudioTracks();
       }
       void safePlay(video);
     };
+
+    const hasAltLiveFeeds = isLive && liveFeedsList.length > 1;
+    const hasAltVodMirrors =
+      !isLive &&
+      sourcesRef.current.some(
+        (s) =>
+          s.id !== activeSource.id &&
+          !failedSourceIdsRef.current.has(s.id) &&
+          !s.url.includes('/api/torrent/stream')
+      );
+    const isRemuxSrc = activeSource.url.includes('remux=1');
+    const stallBudgetMs = hasAltLiveFeeds
+      ? 1500
+      : hasAltVodMirrors
+      ? isRemuxSrc
+        ? 11500
+        : 7500
+      : isRemuxSrc
+      ? 16000
+      : 11000;
 
     startupStallTimer = window.setTimeout(() => {
       if (cancelled) return;
@@ -1157,10 +1347,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
             : 'Stream startup timed out without receiving video frames. Click Continue to switch to another server.'
         );
       }
-    }, 18000);
+    }, stallBudgetMs);
 
     let retryCount = 0;
     let triedNativeFallback = false;
+
+    const onDirectVideoError = () => {
+      if (cancelled || hlsActiveRef.current) return;
+      if (!video.getAttribute('src')) return;
+      clearStallTimer();
+      handlePlaybackFailure(
+        activeSource,
+        isLive
+          ? 'Playback error loading this live stream. Click Continue to retry or switch channels.'
+          : 'Unable to play this stream directly in the browser.'
+      );
+    };
 
     const tryNativeFallback = () => {
       if (cancelled || triedNativeFallback) return false;
@@ -1178,24 +1380,35 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       }
       video.src = activeSource.url;
       video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true });
+      video.addEventListener('canplay', handleLoadedMetadata, { once: true });
+      video.addEventListener('error', onDirectVideoError, { once: true });
+      video.load();
       return true;
     };
+
+    const bufferMb = storageService.getPlayerBufferMb();
+    const hlsMaxLen = bufferMb === 25 ? 25 : bufferMb === 50 ? 45 : bufferMb === 75 ? 65 : 90;
+    const hlsMaxMaxLen = bufferMb === 25 ? 45 : bufferMb === 50 ? 90 : bufferMb === 75 ? 120 : 150;
+    let localHls: Hls | null = null;
 
     if (activeSource.format === 'hls' && Hls.isSupported()) {
       hlsActiveRef.current = true;
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: isLive,
+        startPosition: !isLive && startTime > 3 ? startTime : -1,
         backBufferLength: 60,
-        maxBufferLength: 45,
-        maxMaxBufferLength: 90,
-        manifestLoadingTimeOut: 15000,
-        fragLoadingTimeOut: 20000,
-        manifestLoadingMaxRetry: 3,
-        levelLoadingMaxRetry: 3,
-        fragLoadingMaxRetry: 3,
+        maxBufferSize: bufferMb * 1024 * 1024,
+        maxBufferLength: hlsMaxLen,
+        maxMaxBufferLength: hlsMaxMaxLen,
+        manifestLoadingTimeOut: isLive && liveFeedsList.length > 1 ? 3500 : 7500,
+        fragLoadingTimeOut: isLive && liveFeedsList.length > 1 ? 4500 : 10000,
+        manifestLoadingMaxRetry: isLive && liveFeedsList.length > 1 ? 0 : 1,
+        levelLoadingMaxRetry: isLive && liveFeedsList.length > 1 ? 0 : 1,
+        fragLoadingMaxRetry: isLive && liveFeedsList.length > 1 ? 1 : 2,
       });
       hlsRef.current = hls;
+      localHls = hls;
 
       let didAutoPickAudio = false;
       const syncHlsAudioTracks = () => {
@@ -1213,7 +1426,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
               const u = new URL(activeSource.url, window.location.origin);
               urlAudioLang = u.searchParams.get('audioLang') || u.searchParams.get('lang') || '';
             } catch {}
-            const wantedTokens = extractLangTokens(urlAudioLang || activeSource.audioLanguage);
+            const explicitLang = (urlAudioLang || activeSource.audioLanguage || '').trim();
+            const wantedTokens = extractLangTokens(explicitLang);
+            if (wantedTokens.length === 0 && !userLockedLanguageRef.current) {
+              wantedTokens.push('hindi');
+            }
             const hlsLangMatchers: Array<{ key: string; regex: RegExp }> = [
               { key: 'hindi', regex: /\b(hi|hin|hindi)\b/i },
               { key: 'bengali', regex: /\b(bn|ben|bengali|bangla)\b/i },
@@ -1264,6 +1481,14 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         handleLoadedMetadata();
       });
 
+      hls.on(Hls.Events.LEVEL_LOADED, (_evt, data) => {
+        if (cancelled || isLive) return;
+        const totalDur = data.details?.totalduration;
+        if (totalDur && Number.isFinite(totalDur) && totalDur > 0 && !data.details?.live) {
+          setDuration(totalDur);
+        }
+      });
+
       hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, () => {
         syncHlsAudioTracks();
       });
@@ -1294,7 +1519,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           const msg =
             data.type === Hls.ErrorTypes.NETWORK_ERROR
               ? isLive
-                ? 'This broadcast feed is currently unreachable, geo-restricted, or protected by broadcast DRM. Click Continue/Retry, switch to another channel, or add your M3U playlist in Settings > Sources.'
+                ? 'This broadcast feed is currently unreachable, geo-restricted, or protected by broadcast DRM. Click Retry or switch to another channel.'
                 : 'Network or CORS block prevented loading this stream in the browser.'
               : isLive
               ? 'Playback decoder encountered an issue on this live broadcast stream. Click Continue/Retry or switch channels.'
@@ -1306,6 +1531,12 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       hlsActiveRef.current = false;
       video.src = activeSource.url;
       video.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true });
+      video.addEventListener('canplay', handleLoadedMetadata, { once: true });
+      video.addEventListener('error', onDirectVideoError, { once: true });
+      video.load();
+      if (video.readyState >= 1) {
+        handleLoadedMetadata();
+      }
     }
 
     return () => {
@@ -1313,15 +1544,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       clearStallTimer();
       hlsActiveRef.current = false;
       video.removeEventListener('loadedmetadata', handleLoadedMetadata);
+      video.removeEventListener('canplay', handleLoadedMetadata);
+      video.removeEventListener('error', onDirectVideoError);
       const pendingPlay = playPromiseRef.current;
       const cleanupMedia = () => {
-        if (hlsRef.current) {
-          hlsRef.current.destroy();
-          hlsRef.current = null;
+        if (localHls) {
+          localHls.destroy();
+          if (hlsRef.current === localHls) {
+            hlsRef.current = null;
+          }
         }
-        video.pause();
-        video.removeAttribute('src');
-        video.load();
+        // Only tear down the shared <video> element if no newer source mount superseded us
+        if (myGen === mountGenRef.current) {
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        }
       };
       if (pendingPlay) {
         void pendingPlay.catch(() => {}).finally(cleanupMedia);
@@ -1329,9 +1567,28 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         cleanupMedia();
       }
     };
-  }, [activeSource, p2pAttachUrl, isActiveP2PTorrent, isLive, safePlay, reloadTick, handlePlaybackFailure]);
+  }, [activeSource, p2pAttachUrl, isActiveP2PTorrent, isLive, liveFeedsList.length, safePlay, reloadTick, handlePlaybackFailure]);
 
-  // Sync subtitle track cues to custom caption overlay
+  // Helper to resolve shifted subtitle cues cleanly (supports remux ?ss=N offset)
+  const syncOffsetCueText = useCallback(
+    (track: TextTrack, offsetSec: number, videoTime: number) => {
+      if (offsetSec <= 0) return;
+      const cues = track.cues;
+      if (!cues || cues.length === 0) return;
+      const absTime = offsetSec + videoTime;
+      const matched: string[] = [];
+      for (let i = 0; i < cues.length; i += 1) {
+        const cue = cues[i] as VTTCue;
+        if (cue.startTime <= absTime && cue.endTime >= absTime && cue.text) {
+          matched.push(cue.text);
+        }
+      }
+      setActiveCueText(matched.join('\n'));
+    },
+    []
+  );
+
+  // Sync subtitle track cues to custom caption overlay (match by track ID / label, not brittle index)
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -1346,8 +1603,18 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       return;
     }
 
-    const activeIndex = subtitles.findIndex((s) => s.id === activeSubtitleId);
-    const targetTrack = activeIndex >= 0 ? video.textTracks[activeIndex] : null;
+    const activeSubMeta = subtitles.find((s) => s.id === activeSubtitleId);
+    const targetTrack =
+      tracks.find((t) => t.id === activeSubtitleId) ||
+      (activeSubMeta
+        ? tracks.find(
+            (t) =>
+              t.label === activeSubMeta.label &&
+              (!t.language || t.language === activeSubMeta.language)
+          )
+        : undefined) ||
+      null;
+
     if (!targetTrack) {
       setActiveCueText('');
       return;
@@ -1356,6 +1623,14 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     targetTrack.mode = 'hidden';
 
     const onCueChange = () => {
+      if (seekOffsetSecondsRef.current > 0) {
+        syncOffsetCueText(
+          targetTrack,
+          seekOffsetSecondsRef.current,
+          videoRef.current?.currentTime || 0
+        );
+        return;
+      }
       const cues = targetTrack.activeCues;
       if (cues && cues.length > 0) {
         const lines = Array.from(cues)
@@ -1373,9 +1648,9 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     return () => {
       targetTrack.removeEventListener('cuechange', onCueChange);
     };
-  }, [activeSubtitleId, subtitles, resolvedSubUrls]);
+  }, [activeSubtitleId, subtitles, resolvedSubUrls, syncOffsetCueText]);
 
-  // Auto-save playback progress every 3 seconds
+  // Auto-save playback progress every 5 seconds (batched writes)
   useEffect(() => {
     if (isLive) return;
     const interval = window.setInterval(() => {
@@ -1385,22 +1660,64 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       if (video && !video.paused && dur > 0) {
         persistProgress(cur, dur);
       }
-    }, 3000);
+    }, 5000);
     return () => window.clearInterval(interval);
   }, [isLive, effectiveDuration, persistProgress]);
 
-  // Auto-hide controls timer
+  // Ongoing playback stall detector: auto-switch VOD server after 4s or Live feed after 1.5s
+  useEffect(() => {
+    if (!isBuffering || !isPlaying || streamError || (isActiveP2PTorrent && p2pAttachUrl !== activeSource?.url)) {
+      return;
+    }
+    const canFailover = isLive
+      ? liveFeedsList.length > 1
+      : sourcesRef.current.some(
+          (s) =>
+            s.id !== activeSource?.id &&
+            !failedSourceIdsRef.current.has(s.id) &&
+            !s.url.includes('/api/torrent/stream')
+        );
+    if (!canFailover || !activeSource) return;
+
+    const timeoutMs = isLive ? 1500 : 25000;
+    const timer = window.setTimeout(() => {
+      const video = videoRef.current;
+      if (!video || video.paused || video.readyState >= 3) return;
+      handlePlaybackFailure(
+        activeSource,
+        isLive ? 'Live feed stalled. Switching backup feed...' : 'Stream stalled.'
+      );
+    }, timeoutMs);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    isBuffering,
+    isPlaying,
+    streamError,
+    isLive,
+    isActiveP2PTorrent,
+    p2pAttachUrl,
+    activeSource,
+    liveFeedsList.length,
+    handlePlaybackFailure,
+  ]);
+
+  // Auto-hide controls timer (keep visible while resolving streams or buffering before first frame)
   const wakeControls = useCallback(() => {
     setShowControls(true);
     if (controlsTimerRef.current) {
       window.clearTimeout(controlsTimerRef.current);
+    }
+    const stillStarting = !hasPlayedFramesRef.current && (isBuffering || isResolvingStreams || sources.length === 0);
+    if (stillStarting) {
+      return;
     }
     controlsTimerRef.current = window.setTimeout(() => {
       if (isPlaying && openMenu === 'none') {
         setShowControls(false);
       }
     }, 3500);
-  }, [isPlaying, openMenu]);
+  }, [isPlaying, openMenu, isBuffering, isResolvingStreams, sources.length]);
 
   useEffect(() => {
     wakeControls();
@@ -1426,23 +1743,25 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       if (!video || isLive) return;
       const maxDuration = effectiveDuration > 0 ? effectiveDuration : Infinity;
       const target = Math.min(maxDuration, Math.max(0, rawTarget));
+      resumePositionRef.current = target;
 
       if (activeSource?.url.includes('remux=1')) {
-        const baseUrl = activeSource.url.replace(/[?&]ss=\d+/, '');
+        const baseUrl = activeSource.url.replace(/[?&]ss=\d+/gi, '').replace(/\?&/, '?');
         const sep = baseUrl.includes('?') ? '&' : '?';
         const seekUrl = `${baseUrl}${sep}ss=${Math.floor(target)}`;
-        seekOffsetSecondsRef.current = target;
-        video.src = seekUrl;
-        video.currentTime = 0;
+        seekOffsetSecondsRef.current = Math.floor(target);
         setCurrentTime(target);
-        void safePlay(video);
+        setIsBuffering(true);
+        const updatedSource: StreamSource = { ...activeSource, url: seekUrl };
+        setSources((prev) => prev.map((s) => (s.id === activeSource.id ? updatedSource : s)));
+        setActiveSource(updatedSource);
       } else {
         video.currentTime = target;
         setCurrentTime(target);
       }
       wakeControls();
     },
-    [isLive, effectiveDuration, activeSource, safePlay, wakeControls]
+    [isLive, effectiveDuration, activeSource, wakeControls]
   );
 
   const seekBy = useCallback(
@@ -1464,19 +1783,29 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const toggleFullscreen = useCallback(async () => {
     const el = containerRef.current;
+    const isNative = nativeAndroidBridge.isNativeAndroid();
+    const nextFullscreen = isNative ? !isFullscreen : !document.fullscreenElement;
+
+    if (isNative) {
+      await nativeAndroidBridge.setPlayerFullscreen(nextFullscreen, nextFullscreen);
+      setIsFullscreen(nextFullscreen);
+    }
+
     if (!el) return;
     try {
-      if (!document.fullscreenElement) {
+      if (nextFullscreen && !document.fullscreenElement) {
         await el.requestFullscreen();
         setIsFullscreen(true);
-      } else {
+      } else if (!nextFullscreen && document.fullscreenElement) {
         await document.exitFullscreen();
         setIsFullscreen(false);
       }
     } catch {
-      // Fullscreen restricted by browser policy
+      if (isNative) {
+        setIsFullscreen(nextFullscreen);
+      }
     }
-  }, []);
+  }, [isFullscreen]);
 
   const handleClose = useCallback(() => {
     const video = videoRef.current;
@@ -1487,8 +1816,39 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     if (document.fullscreenElement) {
       void document.exitFullscreen().catch(() => {});
     }
+    void nativeAndroidBridge.setPlayerFullscreen(false, false);
     closePlayback();
   }, [closePlayback, effectiveDuration, persistProgress]);
+
+  // Auto-lock screen orientation to landscape and request fullscreen when playing any video
+  useEffect(() => {
+    try {
+      if (typeof window !== 'undefined' && window.screen && window.screen.orientation && typeof window.screen.orientation.lock === 'function') {
+        void window.screen.orientation.lock('landscape').catch(() => {});
+      }
+      void nativeAndroidBridge.setPlayerFullscreen(true, true);
+      const el = containerRef.current;
+      if (el && !document.fullscreenElement) {
+        void el.requestFullscreen().catch(() => {});
+      }
+    } catch {
+      // Ignore orientation lock restrictions
+    }
+
+    return () => {
+      try {
+        if (typeof window !== 'undefined' && window.screen && window.screen.orientation && typeof window.screen.orientation.unlock === 'function') {
+          window.screen.orientation.unlock();
+        }
+        if (document.fullscreenElement) {
+          void document.exitFullscreen().catch(() => {});
+        }
+        void nativeAndroidBridge.setPlayerFullscreen(false, false);
+      } catch {
+        // Ignore
+      }
+    };
+  }, []);
 
   // Keyboard shortcuts
   useEffect(() => {
@@ -1713,17 +2073,23 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const handleSelectLanguage = (opt: (typeof unifiedLanguageOptions)[number]) => {
     userLockedLanguageRef.current = true;
+    const curAbsTime =
+      seekOffsetSecondsRef.current + (videoRef.current?.currentTime || 0) ||
+      resumePositionRef.current;
+    if (curAbsTime > 0) {
+      resumePositionRef.current = curAbsTime;
+    }
+
     if (opt.type === 'hls-track' && typeof opt.trackIndex === 'number') {
       selectAudioTrack(opt.trackIndex);
     } else if (opt.type === 'remux-lang' && opt.targetLang && activeSource) {
       let nextUrl = activeSource.url.includes('lang=')
         ? activeSource.url.replace(/([?&]lang=)[^&]*/i, `$1${encodeURIComponent(opt.targetLang)}`)
         : `${activeSource.url}&lang=${encodeURIComponent(opt.targetLang)}`;
-      const curTime = videoRef.current?.currentTime || 0;
-      if (nextUrl.includes('/api/stream-proxy') && curTime > 4) {
+      if (nextUrl.includes('/api/stream-proxy') && curAbsTime > 4) {
         nextUrl = nextUrl.includes('ss=')
-          ? nextUrl.replace(/([?&]ss=)[^&]*/i, `$1${Math.floor(curTime)}`)
-          : `${nextUrl}&ss=${Math.floor(curTime)}`;
+          ? nextUrl.replace(/([?&]ss=)[^&]*/i, `$1${Math.floor(curAbsTime)}`)
+          : `${nextUrl}&ss=${Math.floor(curAbsTime)}`;
       }
       const updatedSource: StreamSource = { ...activeSource, url: nextUrl };
       setSources((prev) => prev.map((s) => (s.id === activeSource.id ? updatedSource : s)));
@@ -1735,7 +2101,13 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           (s) => (s.audioLanguage || '').toLowerCase() === opt.targetLang?.toLowerCase()
         );
       if (best && best.id !== activeSource?.id) {
-        setActiveSource(best);
+        let targetSrc = best;
+        if (targetSrc.url.includes('remux=1') && curAbsTime > 4) {
+          const base = targetSrc.url.replace(/[?&]ss=\d+/gi, '').replace(/\?&/, '?');
+          const sep = base.includes('?') ? '&' : '?';
+          targetSrc = { ...targetSrc, url: `${base}${sep}ss=${Math.floor(curAbsTime)}` };
+        }
+        setActiveSource(targetSrc);
       }
     }
     setOpenMenu('none');
@@ -1791,7 +2163,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       onClick={wakeControls}
       className="fixed inset-0 z-50 bg-black select-none flex items-center justify-center overflow-hidden"
     >
-      {activeSource?.format === 'youtube' || activeSource?.format === 'embed' ? (
+      {(activeSource?.format === 'youtube' && !isBengaliSession) || activeSource?.format === 'embed' ? (
         <div className="relative h-full w-full flex flex-col bg-black">
           {/* Top Bar */}
           <div className="absolute top-0 inset-x-0 z-30 bg-gradient-to-b from-black/90 via-black/50 to-transparent px-4 sm:px-6 pt-4 pb-8 flex items-center justify-between gap-4">
@@ -1814,45 +2186,73 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
               </div>
             </div>
 
-            {unifiedLanguageOptions.length > 1 && (
-              <div className="relative">
+            <div className="flex items-center gap-2 shrink-0">
+              {!isLive && (
                 <button
                   type="button"
-                  onClick={() => setOpenMenu(openMenu === 'language' ? 'none' : 'language')}
-                  className="min-h-[40px] px-3.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-semibold text-white flex items-center gap-2"
+                  onClick={() => setOpenMenu(openMenu === 'sources' ? 'none' : 'sources')}
+                  aria-label="Open stream sources"
+                  className={`min-h-[40px] px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 transition-colors ${
+                    openMenu === 'sources'
+                      ? 'text-white border-transparent shadow-md'
+                      : 'bg-white/10 hover:bg-white/20 border-white/20 text-white'
+                  }`}
+                  style={openMenu === 'sources' ? { backgroundColor: accent.hex } : undefined}
                 >
-                  <Languages className="h-4 w-4" />
-                  <span>{currentLanguageDisplay}</span>
+                  {sources.length === 0 && isResolvingStreams ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                      <span>Finding...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Server className="h-4 w-4" />
+                      <span>Sources ({sources.length})</span>
+                    </>
+                  )}
                 </button>
+              )}
 
-                {openMenu === 'language' && (
-                  <div className="absolute right-0 top-12 w-64 rounded-2xl liquid-glass-strong p-2 space-y-1 shadow-2xl z-40 max-h-80 overflow-y-auto">
-                    <p className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                      Audio Language
-                    </p>
-                    {unifiedLanguageOptions.map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => handleSelectLanguage(opt)}
-                        className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition-colors ${
-                          opt.isActive
-                            ? 'text-white font-semibold shadow-md'
-                            : 'text-slate-200 hover:bg-white/10'
-                        }`}
-                        style={opt.isActive ? { backgroundColor: accent.hex } : undefined}
-                      >
-                        <span>{opt.label}</span>
-                        {opt.isActive && <Check className="h-4 w-4 text-white" />}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
+              {unifiedLanguageOptions.length > 1 && (
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setOpenMenu(openMenu === 'language' ? 'none' : 'language')}
+                    className="min-h-[40px] px-3.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-semibold text-white flex items-center gap-2"
+                  >
+                    <Languages className="h-4 w-4" />
+                    <span>{currentLanguageDisplay}</span>
+                  </button>
+
+                  {openMenu === 'language' && (
+                    <div className="absolute right-0 top-12 w-64 rounded-2xl liquid-glass-strong p-2 space-y-1 shadow-2xl z-40 max-h-80 overflow-y-auto">
+                      <p className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                        Audio Language
+                      </p>
+                      {unifiedLanguageOptions.map((opt) => (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          onClick={() => handleSelectLanguage(opt)}
+                          className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition-colors ${
+                            opt.isActive
+                              ? 'text-white font-semibold shadow-md'
+                              : 'text-slate-200 hover:bg-white/10'
+                          }`}
+                          style={opt.isActive ? { backgroundColor: accent.hex } : undefined}
+                        >
+                          <span>{opt.label}</span>
+                          {opt.isActive && <Check className="h-4 w-4 text-white" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
 
-          {activeSource.format === 'youtube' ? (
+          {activeSource.format === 'youtube' && !isBengaliSession ? (
             <iframe
               src={activeSource.url}
               title={session.title}
@@ -1914,6 +2314,17 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                       <span>Continue</span>
                     </button>
                   )}
+
+                  {!isLive && (
+                    <button
+                      type="button"
+                      onClick={() => setOpenMenu('sources')}
+                      className="min-h-[44px] px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs sm:text-sm font-medium inline-flex items-center gap-2 transition-colors"
+                    >
+                      <Server className="h-4 w-4" />
+                      <span>Switch Server ({sources.length})</span>
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -1966,8 +2377,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
             }}
             onWaiting={() => setIsBuffering(true)}
             onPlaying={() => {
+              hasPlayedFramesRef.current = true;
               setIsBuffering(false);
               setIsPlaying(true);
+              wakeControls();
               if (isLive && session.liveChannel) {
                 markChannelHealth(session.liveChannel.id, true);
               }
@@ -1976,15 +2389,30 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
             onTimeUpdate={() => {
               const video = videoRef.current;
               if (!video) return;
-              setIsBuffering(false);
-              const computedCurrent = seekOffsetSecondsRef.current + (video.currentTime || 0);
-              if (seekPreviewTime === null) {
-                setCurrentTime(computedCurrent);
+              const rawTime = video.currentTime || 0;
+              const computedCurrent = seekOffsetSecondsRef.current + rawTime;
+              resumePositionRef.current = computedCurrent;
+
+              if (activeSubtitleId !== 'off' && seekOffsetSecondsRef.current > 0) {
+                const tracks = Array.from(video.textTracks);
+                const tTrack = tracks.find((t) => t.id === activeSubtitleId);
+                if (tTrack) {
+                  syncOffsetCueText(tTrack, seekOffsetSecondsRef.current, rawTime);
+                }
               }
-              if (video.buffered.length > 0) {
-                setBufferedEnd(
-                  seekOffsetSecondsRef.current + video.buffered.end(video.buffered.length - 1)
-                );
+
+              const now = performance.now();
+              if (now - lastUiTimeUpdateRef.current >= 250) {
+                lastUiTimeUpdateRef.current = now;
+                setIsBuffering(false);
+                if (seekPreviewTime === null) {
+                  setCurrentTime(computedCurrent);
+                }
+                if (video.buffered.length > 0) {
+                  setBufferedEnd(
+                    seekOffsetSecondsRef.current + video.buffered.end(video.buffered.length - 1)
+                  );
+                }
               }
             }}
             onDurationChange={() => {
@@ -2002,6 +2430,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           return (
             <track
               key={`${sub.id}-${idx}`}
+              id={sub.id}
               kind="subtitles"
               src={srcUrl}
               srcLang={sub.language}
@@ -2034,6 +2463,35 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           }}
           hasAlternativeSources={sources.length > 1}
         />
+      )}
+
+      {/* Tap-to-Unmute prompt if browser/WebView enforced muted autoplay */}
+      {showUnmutePrompt && isMuted && !streamError && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            const v = videoRef.current;
+            if (v) {
+              v.muted = false;
+              v.volume = volumeRef.current || 1;
+            }
+            isMutedRef.current = false;
+            setIsMuted(false);
+            setShowUnmutePrompt(false);
+          }}
+          className="player-interactive absolute top-20 left-1/2 -translate-x-1/2 z-30 px-4 py-2 rounded-full bg-black/80 hover:bg-black/95 border border-white/25 text-xs font-semibold text-white flex items-center gap-2 shadow-2xl backdrop-blur-xl transition-transform active:scale-95"
+        >
+          <VolumeX className="h-4 w-4 text-amber-400" />
+          <span>Audio Muted · Tap to Unmute</span>
+        </button>
+      )}
+
+      {/* Live Backup Feed Auto-Failover Toast */}
+      {liveSwitchToast && !streamError && (
+        <div className="pointer-events-none absolute top-16 left-1/2 -translate-x-1/2 z-30 px-4 py-1.5 rounded-full bg-black/80 border border-white/20 text-xs font-semibold text-amber-300 shadow-xl">
+          {liveSwitchToast}
+        </div>
       )}
 
       {/* Buffering Spinner */}
@@ -2225,7 +2683,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                   <Maximize2 className="h-4 w-4" />
                   <span className="hidden sm:inline">{videoFit === 'cover' ? 'Fill' : 'Fit'}</span>
                 </button>
-                {sources.length > 0 && !isLive && (
+                {!isLive && (
                   <button
                     type="button"
                     onClick={() => setOpenMenu(openMenu === 'sources' ? 'none' : 'sources')}
@@ -2237,8 +2695,17 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     }`}
                     style={openMenu === 'sources' ? { backgroundColor: accent.hex } : undefined}
                   >
-                    <Server className="h-4 w-4" />
-                    <span className="hidden sm:inline">Sources ({sources.length})</span>
+                    {sources.length === 0 && isResolvingStreams ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>Finding...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Server className="h-4 w-4" />
+                        <span>Sources ({sources.length})</span>
+                      </>
+                    )}
                   </button>
                 )}
               </>
@@ -2491,7 +2958,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                   </button>
                 )}
 
-                {sources.length > 0 && !isLive && (
+                {!isLive && (
                   <button
                     type="button"
                     onClick={() =>
@@ -2504,8 +2971,17 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     }`}
                     style={openMenu === 'sources' ? { backgroundColor: accent.hex } : undefined}
                   >
-                    <Server className="h-4 w-4" />
-                    <span className="hidden sm:inline">Sources</span>
+                    {sources.length === 0 && isResolvingStreams ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        <span>Finding...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Server className="h-4 w-4" />
+                        <span>Sources ({sources.length})</span>
+                      </>
+                    )}
                   </button>
                 )}
 
@@ -2524,6 +3000,76 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                         'Quality'}
                   </span>
                 </button>
+
+                {nativeAndroidBridge.isNativeAndroid() &&
+                  activeSource?.url && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          videoRef.current?.pause();
+                          void nativeAndroidBridge.openNativeExoPlayer({
+                            url: activeSource.url,
+                            title: session.title,
+                            subtitle:
+                              session.mediaType === 'tv' &&
+                              session.seasonNumber &&
+                              session.episodeNumber
+                                ? `S${session.seasonNumber} E${session.episodeNumber}`
+                                : activeSource.providerName,
+                            isLive,
+                            bufferMb: storageService.getPlayerBufferMb(),
+                            fallbackUrls: isLive
+                              ? liveFeedsList
+                                  .filter((f) => f.streamUrl !== liveFeedsList[activeLiveFeedIdx]?.streamUrl)
+                                  .map((f) => f.streamUrl)
+                              : sources
+                                  .filter(
+                                    (s) =>
+                                      s.id !== activeSource.id &&
+                                      (s.format === 'hls' || s.format === 'mp4')
+                                  )
+                                  .slice(0, 5)
+                                  .map((s) => s.url),
+                          });
+                        }}
+                        aria-label="Open in Native Android ExoPlayer"
+                        title="Open in Native Android ExoPlayer"
+                        className="min-h-[40px] px-2.5 rounded-lg bg-[#E50914]/85 hover:bg-[#E50914] text-xs font-semibold text-white inline-flex items-center gap-1.5"
+                      >
+                        <Smartphone className="h-4 w-4" />
+                        <span className="hidden sm:inline">ExoPlayer</span>
+                      </button>
+
+                      {!isLive && activeSource.format === 'mp4' && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void nativeAndroidBridge.downloadWithAndroidManager({
+                              url: activeSource.url,
+                              fileName: `${session.title.replace(/[^a-zA-Z0-9._-]+/g, '_')}.mp4`,
+                              title: session.title,
+                            })
+                          }
+                          aria-label="Download with Android DownloadManager"
+                          title="Download with Android DownloadManager"
+                          className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/15 text-white"
+                        >
+                          <Download className="h-4 w-4" />
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => void nativeAndroidBridge.enterPictureInPicture()}
+                        aria-label="Picture in Picture"
+                        title="Picture in Picture"
+                        className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/15 text-white"
+                      >
+                        <PictureInPicture2 className="h-4 w-4" />
+                      </button>
+                    </>
+                  )}
 
                 <button
                   type="button"
@@ -2689,6 +3235,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                           key={`${src.id}-${idx}`}
                           type="button"
                           onClick={() => {
+                            const curPos =
+                              seekOffsetSecondsRef.current + (videoRef.current?.currentTime || 0) ||
+                              resumePositionRef.current;
+                            if (curPos > 0) resumePositionRef.current = curPos;
                             setStreamError(null);
                             setActiveSource(src);
                             setOpenMenu('none');
@@ -2729,256 +3279,270 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           </div>
         )}
       </div>
+    </>
+  )}
 
-      {/* In-Player Slide-Over Sources Drawer */}
-      {openMenu === 'sources' && !isLocked && (
-        <div
-          onClick={(e) => e.stopPropagation()}
-          className="player-interactive absolute inset-y-0 right-0 z-40 w-80 sm:w-96 max-w-[92vw] liquid-glass-strong border-l border-white/15 flex flex-col shadow-2xl"
-        >
-          <div className="px-4 py-3.5 border-b border-white/10 flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2.5">
-              <Server className="h-5 w-5 text-white" />
-              <div>
-                <h3 className="font-display text-base font-bold text-white leading-tight">Sources</h3>
-                <p className="text-[10px] font-mono-tabular text-slate-400">
-                  {filteredDrawerSources.length} of {sources.length} servers
-                </p>
-              </div>
-            </div>
+  {/* In-Player Slide-Over Sources Drawer (available across video, embed, and loading states) */}
+  {openMenu === 'sources' && !isLocked && (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      className="player-interactive absolute inset-y-0 right-0 z-40 w-80 sm:w-96 max-w-[92vw] liquid-glass-strong border-l border-white/15 flex flex-col shadow-2xl"
+    >
+      <div className="px-4 py-3.5 border-b border-white/10 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5">
+          <Server className="h-5 w-5 text-white" />
+          <div>
+            <h3 className="font-display text-base font-bold text-white leading-tight">Sources</h3>
+            <p className="text-[10px] font-mono-tabular text-slate-400">
+              {isResolvingStreams
+                ? `Searching providers · ${sources.length} ready`
+                : `${filteredDrawerSources.length} of ${sources.length} servers`}
+            </p>
+          </div>
+        </div>
 
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => setVideoFit((prev) => (prev === 'contain' ? 'cover' : 'contain'))}
-                aria-label="Toggle Fit/Fill"
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
-              >
-                <Maximize2 className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setIsLocked(true);
-                  setOpenMenu('none');
-                }}
-                aria-label="Lock player"
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
-              >
-                <Lock className="h-4 w-4" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setOpenMenu('none')}
-                aria-label="Close sources"
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-white/15 hover:bg-white/25 text-white"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => setVideoFit((prev) => (prev === 'contain' ? 'cover' : 'contain'))}
+            aria-label="Toggle Fit/Fill"
+            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
+          >
+            <Maximize2 className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setIsLocked(true);
+              setOpenMenu('none');
+            }}
+            aria-label="Lock player"
+            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/20 text-white"
+          >
+            <Lock className="h-4 w-4" />
+          </button>
+          <button
+            type="button"
+            onClick={() => setOpenMenu('none')}
+            aria-label="Close sources"
+            className="min-h-[36px] min-w-[36px] flex items-center justify-center rounded-lg bg-white/15 hover:bg-white/25 text-white"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+      </div>
+
+      {/* Drawer Filters: Type, Provider, Language & Quality */}
+      {sources.length > 1 && (
+        <div className="px-3 py-2.5 border-b border-white/10 bg-black/30 space-y-2">
+          <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+            <Filter className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+            {(
+              [
+                { id: 'all', label: 'All', show: true },
+                { id: 'direct', label: 'Direct', show: sources.some((s) => getSourceFlags(s).isDirectInstant) },
+                { id: 'nuvio', label: 'Nuvio', show: sources.some((s) => getSourceFlags(s).isNuvio) },
+                { id: 'stremio', label: 'Stremio', show: sources.some((s) => getSourceFlags(s).isStremio) },
+                { id: 'cloudstream', label: 'CloudStream', show: sources.some((s) => getSourceFlags(s).isCS) },
+                { id: 'p2p', label: 'P2P', show: sources.some((s) => getSourceFlags(s).isP2P) },
+              ] as const
+            )
+              .filter((t) => t.show)
+              .map((t) => (
+                <button
+                  key={t.id}
+                  type="button"
+                  onClick={() => setDrawerTypeFilter(t.id)}
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
+                    drawerTypeFilter === t.id
+                      ? 'bg-white text-slate-900 border-white'
+                      : 'bg-white/[0.06] text-slate-300 border-white/10 hover:bg-white/10'
+                  }`}
+                >
+                  {t.label}
+                </button>
+              ))}
           </div>
 
-          {/* Drawer Filters: Type, Provider, Language & Quality */}
-          {sources.length > 1 && (
-            <div className="px-3 py-2.5 border-b border-white/10 bg-black/30 space-y-2">
-              <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
-                <Filter className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-                {(
-                  [
-                    { id: 'all', label: 'All', show: true },
-                    { id: 'direct', label: 'Direct', show: sources.some((s) => getSourceFlags(s).isDirectInstant) },
-                    { id: 'nuvio', label: 'Nuvio', show: sources.some((s) => getSourceFlags(s).isNuvio) },
-                    { id: 'stremio', label: 'Stremio', show: sources.some((s) => getSourceFlags(s).isStremio) },
-                    { id: 'cloudstream', label: 'CloudStream', show: sources.some((s) => getSourceFlags(s).isCS) },
-                    { id: 'p2p', label: 'P2P', show: sources.some((s) => getSourceFlags(s).isP2P) },
-                  ] as const
-                )
-                  .filter((t) => t.show)
-                  .map((t) => (
-                    <button
-                      key={t.id}
-                      type="button"
-                      onClick={() => setDrawerTypeFilter(t.id)}
-                      className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
-                        drawerTypeFilter === t.id
-                          ? 'bg-white text-slate-900 border-white'
-                          : 'bg-white/[0.06] text-slate-300 border-white/10 hover:bg-white/10'
-                      }`}
-                    >
-                      {t.label}
-                    </button>
-                  ))}
-              </div>
-
-              {drawerProviders.length > 1 && (
-                <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setDrawerProviderFilter('All')}
-                    className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
-                      drawerProviderFilter === 'All'
-                        ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50'
-                        : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
-                    }`}
-                  >
-                    All Providers
-                  </button>
-                  {drawerProviders.map(({ name, count }) => (
-                    <button
-                      key={name}
-                      type="button"
-                      onClick={() => setDrawerProviderFilter(name)}
-                      className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
-                        drawerProviderFilter === name
-                          ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50'
-                          : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
-                      }`}
-                    >
-                      {name} ({count})
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              <div className="flex items-center gap-1.5 overflow-x-auto">
-                {drawerLanguages.length > 1 && (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => setDrawerLanguageFilter('All')}
-                      className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
-                        drawerLanguageFilter === 'All'
-                          ? 'text-white border-transparent'
-                          : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
-                      }`}
-                      style={drawerLanguageFilter === 'All' ? { backgroundColor: accent.hex } : undefined}
-                    >
-                      All Lang
-                    </button>
-                    {drawerLanguages.map(({ lang }) => (
-                      <button
-                        key={lang}
-                        type="button"
-                        onClick={() => setDrawerLanguageFilter(lang)}
-                        className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
-                          drawerLanguageFilter === lang
-                            ? 'text-white border-transparent'
-                            : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
-                        }`}
-                        style={drawerLanguageFilter === lang ? { backgroundColor: accent.hex } : undefined}
-                      >
-                        {lang}
-                      </button>
-                    ))}
-                    <span className="h-3.5 w-px bg-white/10 shrink-0" />
-                  </>
-                )}
-
-                {(['all', '4k', '1080p', '720p', '480p'] as const).map((qOpt) => (
-                  <button
-                    key={qOpt}
-                    type="button"
-                    onClick={() => setDrawerQualityFilter(qOpt)}
-                    className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
-                      drawerQualityFilter === qOpt
-                        ? 'bg-sky-500/25 text-sky-200 border-sky-400/50'
-                        : 'bg-white/[0.04] text-slate-400 border-white/10 hover:text-slate-200'
-                    }`}
-                  >
-                    {qOpt === 'all' ? 'Any Qual' : qOpt.toUpperCase()}
-                  </button>
-                ))}
-              </div>
+          {drawerProviders.length > 1 && (
+            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+              <button
+                type="button"
+                onClick={() => setDrawerProviderFilter('All')}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
+                  drawerProviderFilter === 'All'
+                    ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50'
+                    : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
+                }`}
+              >
+                All Providers
+              </button>
+              {drawerProviders.map(({ name, count }) => (
+                <button
+                  key={name}
+                  type="button"
+                  onClick={() => setDrawerProviderFilter(name)}
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
+                    drawerProviderFilter === name
+                      ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50'
+                      : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
+                  }`}
+                >
+                  {name} ({count})
+                </button>
+              ))}
             </div>
           )}
 
-          <div className="flex-1 overflow-y-auto p-3 space-y-2.5 touch-auto">
-            {filteredDrawerSources.length === 0 ? (
-              <div className="p-5 rounded-2xl bg-black/40 border border-white/10 text-center space-y-3">
-                <p className="text-xs text-slate-300">No servers match the selected filters.</p>
-                {hasDrawerFilter && (
+          <div className="flex items-center gap-1.5 overflow-x-auto">
+            {drawerLanguages.length > 1 && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setDrawerLanguageFilter('All')}
+                  className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
+                    drawerLanguageFilter === 'All'
+                      ? 'text-white border-transparent'
+                      : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
+                  }`}
+                  style={drawerLanguageFilter === 'All' ? { backgroundColor: accent.hex } : undefined}
+                >
+                  All Lang
+                </button>
+                {drawerLanguages.map(({ lang }) => (
                   <button
+                    key={lang}
                     type="button"
-                    onClick={resetDrawerFilters}
-                    className="px-3.5 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 text-xs font-semibold text-white inline-flex items-center gap-1.5"
-                  >
-                    <RotateCcw className="h-3.5 w-3.5" />
-                    <span>Reset Filters</span>
-                  </button>
-                )}
-              </div>
-            ) : (
-              filteredDrawerSources.map((src, idx) => {
-                const isActive = activeSource?.id === src.id;
-                const { isP2P } = getSourceFlags(src);
-                return (
-                  <button
-                    key={`${src.id}-${idx}`}
-                    type="button"
-                    onClick={() => {
-                      p2pBypassForSourceRef.current = null;
-                      setStreamError(null);
-                      setIsBuffering(true);
-                      setActiveSource(src);
-                      setOpenMenu('none');
-                    }}
-                    className={`w-full text-left p-3 rounded-2xl border transition-all space-y-2 ${
-                      isActive
-                        ? 'bg-white/[0.14] border-white/40 shadow-lg'
-                        : 'bg-black/40 hover:bg-white/[0.08] border-white/10'
+                    onClick={() => setDrawerLanguageFilter(lang)}
+                    className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
+                      drawerLanguageFilter === lang
+                        ? 'text-white border-transparent'
+                        : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
                     }`}
+                    style={drawerLanguageFilter === lang ? { backgroundColor: accent.hex } : undefined}
                   >
-                    {idx === 0 && (
-                      <span className="inline-block px-2 py-0.5 rounded bg-white/10 border border-white/20 text-[10px] font-bold tracking-wider text-slate-200 uppercase">
-                        Recommended
-                      </span>
-                    )}
-
-                    <div className="flex items-center justify-between gap-2">
-                      <p className="text-xs sm:text-sm font-semibold text-white truncate">
-                        {src.providerName} {src.seeders !== undefined ? `| ${src.seeders}` : ''} | {src.quality}
-                      </p>
-                      {isActive && (
-                        <Check className="h-4 w-4 shrink-0 text-emerald-400" />
-                      )}
-                    </div>
-
-                    <p className="text-[11px] text-slate-300 truncate">{src.label}</p>
-
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="px-2 py-0.5 rounded-md bg-white/10 text-[10px] font-semibold text-white">
-                        {src.quality}
-                      </span>
-                      {src.audioLanguage && (
-                        <span className="px-2 py-0.5 rounded-md bg-white/10 text-[10px] font-semibold text-slate-200">
-                          [{src.audioLanguage}]
-                        </span>
-                      )}
-                      {src.sizeLabel && (
-                        <span className="px-2 py-0.5 rounded-md bg-white/10 text-[10px] font-mono-tabular text-slate-200">
-                          {src.sizeLabel}
-                        </span>
-                      )}
-                      {src.seeders !== undefined && (
-                        <span className="px-2 py-0.5 rounded-md bg-blue-500/20 border border-blue-500/30 text-[10px] font-mono-tabular text-blue-300 inline-flex items-center gap-1">
-                          <Users className="h-3 w-3" />
-                          <span>{src.seeders}</span>
-                        </span>
-                      )}
-                      {isP2P && (
-                        <span className="px-2 py-0.5 rounded-md bg-purple-500/25 border border-purple-500/35 text-[10px] font-semibold text-purple-200">
-                          P2P Torrent
-                        </span>
-                      )}
-                    </div>
+                    {lang}
                   </button>
-                );
-              })
+                ))}
+                <span className="h-3.5 w-px bg-white/10 shrink-0" />
+              </>
             )}
+
+            {(['all', '4k', '1080p', '720p', '480p'] as const).map((qOpt) => (
+              <button
+                key={qOpt}
+                type="button"
+                onClick={() => setDrawerQualityFilter(qOpt)}
+                className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
+                  drawerQualityFilter === qOpt
+                    ? 'bg-sky-500/25 text-sky-200 border-sky-400/50'
+                    : 'bg-white/[0.04] text-slate-400 border-white/10 hover:text-slate-200'
+                }`}
+              >
+                {qOpt === 'all' ? 'Any Qual' : qOpt.toUpperCase()}
+              </button>
+            ))}
           </div>
         </div>
       )}
-    </>
+
+      <div className="flex-1 overflow-y-auto p-3 space-y-2.5 touch-auto">
+        {sources.length === 0 && isResolvingStreams ? (
+          <div className="p-6 rounded-2xl bg-black/40 border border-white/10 text-center space-y-3">
+            <Loader2 className="h-6 w-6 animate-spin text-slate-300 mx-auto" />
+            <p className="text-xs text-slate-300">
+              Searching PlavioHD, Nuvio & Stremio providers...
+            </p>
+          </div>
+        ) : filteredDrawerSources.length === 0 ? (
+          <div className="p-5 rounded-2xl bg-black/40 border border-white/10 text-center space-y-3">
+            <p className="text-xs text-slate-300">No servers match the selected filters.</p>
+            {hasDrawerFilter && (
+              <button
+                type="button"
+                onClick={resetDrawerFilters}
+                className="px-3.5 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 text-xs font-semibold text-white inline-flex items-center gap-1.5"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                <span>Reset Filters</span>
+              </button>
+            )}
+          </div>
+        ) : (
+          filteredDrawerSources.map((src, idx) => {
+            const isActive = activeSource?.id === src.id;
+            const { isP2P } = getSourceFlags(src);
+            return (
+              <button
+                key={`${src.id}-${idx}`}
+                type="button"
+                onClick={() => {
+                  const curPos =
+                    seekOffsetSecondsRef.current + (videoRef.current?.currentTime || 0) ||
+                    resumePositionRef.current;
+                  if (curPos > 0) resumePositionRef.current = curPos;
+                  userSelectedSourceRef.current = true;
+                  p2pBypassForSourceRef.current = null;
+                  setStreamError(null);
+                  setIsBuffering(true);
+                  setActiveSource(src);
+                  setOpenMenu('none');
+                }}
+                className={`w-full text-left p-3 rounded-2xl border transition-all space-y-2 ${
+                  isActive
+                    ? 'bg-white/[0.14] border-white/40 shadow-lg'
+                    : 'bg-black/40 hover:bg-white/[0.08] border-white/10'
+                }`}
+              >
+                {idx === 0 && (
+                  <span className="inline-block px-2 py-0.5 rounded bg-white/10 border border-white/20 text-[10px] font-bold tracking-wider text-slate-200 uppercase">
+                    Recommended
+                  </span>
+                )}
+
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs sm:text-sm font-semibold text-white truncate">
+                    {src.providerName} {src.seeders !== undefined ? `| ${src.seeders}` : ''} | {src.quality}
+                  </p>
+                  {isActive && (
+                    <Check className="h-4 w-4 shrink-0 text-emerald-400" />
+                  )}
+                </div>
+
+                <p className="text-[11px] text-slate-300 truncate">{src.label}</p>
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="px-2 py-0.5 rounded-md bg-white/10 text-[10px] font-semibold text-white">
+                    {src.quality}
+                  </span>
+                  {src.audioLanguage && (
+                    <span className="px-2 py-0.5 rounded-md bg-white/10 text-[10px] font-semibold text-slate-200">
+                      [{src.audioLanguage}]
+                    </span>
+                  )}
+                  {src.sizeLabel && (
+                    <span className="px-2 py-0.5 rounded-md bg-white/10 text-[10px] font-mono-tabular text-slate-200">
+                      {src.sizeLabel}
+                    </span>
+                  )}
+                  {src.seeders !== undefined && (
+                    <span className="px-2 py-0.5 rounded-md bg-blue-500/20 border border-blue-500/30 text-[10px] font-mono-tabular text-blue-300 inline-flex items-center gap-1">
+                      <Users className="h-3 w-3" />
+                      <span>{src.seeders}</span>
+                    </span>
+                  )}
+                  {isP2P && (
+                    <span className="px-2 py-0.5 rounded-md bg-purple-500/25 border border-purple-500/35 text-[10px] font-semibold text-purple-200">
+                      P2P Torrent
+                    </span>
+                  )}
+                </div>
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
   )}
 </div>
   );

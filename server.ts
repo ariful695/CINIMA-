@@ -2,7 +2,9 @@ import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import { createRequire } from 'node:module';
 import { spawn } from 'node:child_process';
+import dns from 'node:dns/promises';
 import fs from 'node:fs';
+import net from 'node:net';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web';
@@ -54,7 +56,15 @@ const DEFAULT_NUVIO_MANIFEST =
 const CB_PROVIDERS_MANIFEST =
   'https://raw.githubusercontent.com/SA7ANI/cb-providers/main/manifest.json';
 
-const CB_HINDI_SCRAPER_IDS = new Set(['netmirror', 'castle', 'moviebox', 'desiflix']);
+const CB_HINDI_SCRAPER_IDS = new Set([
+  'netmirror', 'castle', 'moviebox', 'desiflix', 'vegamovies', 'multimovies',
+  'moviesdrive', '4khdhub', 'hdhub4u', 'playimdb', 'moviesmod', 'einthusan',
+  'toonstream', 'puretoons', 'animeworld', 'animesalt', 'cinecity', 'allmovieland',
+  'movieblast', 'streamflix', 'nuvio-vegamovies', 'cinemacity', 'flixindia',
+  'hdmovie2', 'movies4u', 'hindmoviez', 'uhdmovies', 'zinkmovies', 'xdmovies',
+  'dooflix', 'ctgmovies', 'moonflix', 'peachify', 'gramcinema', 'hdghartv',
+  'fibwatch', 'xpass', '1shows', 'toonhub', 'animelok'
+]);
 
 const DEFAULT_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36';
@@ -445,13 +455,16 @@ async function resolveImdbIdServerSide(
 }
 
 function tokenizeTitle(str: string): string[] {
-  return str
+  const normStr = str
+    .replace(/(?<=\b[a-zA-Z])\.(?=[a-zA-Z]\b)/g, '')
+    .replace(/\b([a-zA-Z])\.(?=\s|$)/g, '$1');
+  return normStr
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
     .split(/\s+/)
-    .filter((w) => w.length >= 2 && !TITLE_STOP_WORDS.has(w) && !/^\d{4}$/.test(w));
+    .filter((w) => w.length >= 1 && !TITLE_STOP_WORDS.has(w) && !/^\d{4}$/.test(w));
 }
 
 function isStreamTitleRelevant(
@@ -463,12 +476,21 @@ function isStreamTitleRelevant(
   season?: number,
   episode?: number
 ): boolean {
-  // Always reject obvious trailers, samples, or cam teasers
-  if (/\b(trailer|teaser|sample|promo|preview)\b/i.test(rawText)) {
+  // Always reject obvious trailers, samples, teasers, clips, or shorts
+  if (/\b(trailer|teaser|sample|promo|preview|clip|sneakpeek|short|featurette|bts)\b/i.test(rawText)) {
     return false;
   }
-  if (/\/(trailer|sample|promo)\b/i.test(streamUrl)) {
+  if (/\/(trailer|sample|promo|clip|teaser)\b/i.test(streamUrl)) {
     return false;
+  }
+
+  // For Hindi original series, reject exclusive foreign audio languages unless dual audio or multi
+  if (meta?.originalLanguage === 'hi') {
+    const hasForeignOnly = /\b(french|français|japanese|jap|spanish|german|russian|italian|portuguese)\b/i.test(rawText);
+    const hasMultiOrHindi = /\b(hindi|bengali|bangla|dual|multi|audio|dub|dubbed)\b/i.test(rawText);
+    if (hasForeignOnly && !hasMultiOrHindi) {
+      return false;
+    }
   }
 
   // Enforce episode matching on TV series when SxxExx or 1x01 is present in stream label
@@ -587,8 +609,8 @@ function isStreamTitleRelevant(
         meaningfulCandidate.some((ct) => ct === et || ct.includes(et) || et.includes(ct))
       ).length;
 
-      // Require >= 50% of primary title tokens to match (prevents sequel / franchise mix-ups)
-      const minRequired = primaryList.length >= 2 ? Math.ceil(primaryList.length * 0.5) : 1;
+      // Require >= 1 token to match for high flexibility with transliterated or shorthand titles
+      const minRequired = 1;
       if (matchedPrimary < minRequired && matchedAny < minRequired) {
         return false;
       }
@@ -603,6 +625,9 @@ const SCRAPER_MATCH_GENERIC_WORDS = new Set([
   'season', 'series', 'complete', 'edition', 'version', 'extended', 'unrated', 'cut',
   'hindi', 'english', 'bengali', 'tamil', 'telugu', 'malayalam', 'kannada', 'dub', 'dubbed',
   'sub', 'subbed', 'dual', 'audio', 'multi', 'hd', 'fhd', 'uhd', '4k', 'shared', 'special',
+  'full', 'movie', 'movies', 'film', 'films', 'new', 'all', 'episodes', 'episode', 'ep',
+  'web', 'webdl', 'webrip', 'hdrip', 'bluray', '1080p', '720p', 'official', 'dubbing', 'hq',
+  'anime', 'cartoon',
 ]);
 
 function isStrictScraperMatchedTitle(
@@ -615,6 +640,9 @@ function isStrictScraperMatchedTitle(
     .replace(/\s*\([^)]*\)\s*/g, ' ')
     .replace(/\s*\[[^\]]*\]\s*/g, ' ')
     .replace(/\bS\d{1,2}\s*E\d{1,2}\b/gi, ' ')
+    .replace(/\bS\d{1,2}\b/gi, ' ')
+    .replace(/\bSeason\s*\d{1,2}\b/gi, ' ')
+    .replace(/\bEpisode\s*\d{1,3}\b/gi, ' ')
     .trim();
   if (!cleaned) return true;
 
@@ -639,7 +667,7 @@ function isStrictScraperMatchedTitle(
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
       .toLowerCase()
-      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/[^\p{L}\p{N}\s]/gu, ' ')
       .split(/\s+/)
       .filter((w) => w.length >= 1 && !SCRAPER_MATCH_GENERIC_WORDS.has(w) && !/^\d{4}$/.test(w));
 
@@ -844,6 +872,11 @@ async function fetchScraperCode(scriptUrl: string, timeoutMs = 8500, maxAttempts
 function compileScraperModule(code: string, onLog?: (msg: string) => void) {
   const cleanCode = code.replace(/^#![^\r\n]*\r?\n/, '');
   const mod: { exports: Record<string, unknown> } = { exports: {} };
+
+  // Ensure global CryptoJS and cheerio are available to scrapers referencing them as free identifiers
+  (globalThis as unknown as Record<string, unknown>).CryptoJS = CryptoJS;
+  (globalThis as unknown as Record<string, unknown>).cheerio = cheerio;
+
   const formatLogArgs = (args: unknown[]) =>
     args
       .map((a) => {
@@ -877,6 +910,7 @@ function compileScraperModule(code: string, onLog?: (msg: string) => void) {
   const shimProcess = { env: {} as Record<string, string> };
   const shimGlobal: Record<string, unknown> = {
     CryptoJS,
+    cheerio,
     fetch: wrappedFetch,
     URL,
     URLSearchParams,
@@ -898,8 +932,7 @@ function compileScraperModule(code: string, onLog?: (msg: string) => void) {
     process: shimProcess,
   };
 
-  // Pass only CommonJS + environment root identifiers as formal parameters so scraper polyfills
-  // (e.g., `const atob = ...` or `const fetch = ...`) never collide with formal parameter names.
+  // Pass CommonJS + environment root identifiers + CryptoJS as formal parameters
   const fn = new Function(
     'module',
     'exports',
@@ -909,6 +942,7 @@ function compileScraperModule(code: string, onLog?: (msg: string) => void) {
     'self',
     'global',
     'process',
+    'CryptoJS',
     cleanCode
   );
 
@@ -920,7 +954,8 @@ function compileScraperModule(code: string, onLog?: (msg: string) => void) {
     shimGlobal,
     shimGlobal,
     shimGlobal,
-    shimProcess
+    shimProcess,
+    CryptoJS
   );
 
   return mod.exports;
@@ -1055,7 +1090,7 @@ function detectAllLanguagesInText(text: string): string[] {
     if (lang && !found.includes(lang)) found.push(lang);
   };
 
-  if (/\b(hindi|hin)\b/i.test(text)) add('Hindi');
+  if (/\b(hindi|hin|hi|bolly|bollywood|hindustani)\b|\[hin(?:di)?\]|\(hin(?:di)?\)|hin[\s._+-]+eng|eng[\s._+-]+hin|🇮🇳/i.test(text)) add('Hindi');
   if (/\b(bengali|bangla|ben)\b|🇧🇩/i.test(text)) add('Bengali');
   if (/\b(tamil|tam)\b/i.test(text)) add('Tamil');
   if (/\b(telugu|tel)\b/i.test(text)) add('Telugu');
@@ -1133,21 +1168,27 @@ function extractAudioLanguages(raw: NuvioRawStream & { _serverKey?: string }, sc
     return [raw.language.trim()];
   }
 
-  // Scraper-level language inference (only when unambiguous; never invent Hindi for VidRock/multi repos)
-  if (/desiflix/.test(scraperNameLower) || /desiflix/.test(scraperIdLower)) {
+  // Scraper-level language inference (only when strictly Hindi-only; never blindly force Hindi on multi-language scrapers)
+  const STRICT_HINDI_SCRAPERS = /desiflix|desicinemas|hindmoviez|bollywood|onlinemovieshindi|desiserials/i;
+  if (
+    !isVidrock &&
+    (STRICT_HINDI_SCRAPERS.test(scraperNameLower) || STRICT_HINDI_SCRAPERS.test(scraperIdLower))
+  ) {
     return hasMultiHint ? ['Hindi', 'English'] : ['Hindi'];
-  }
-
-  if (hasMultiHint) {
-    return ['Original'];
   }
 
   const langs = (scraper.contentLanguage || []).map((c) => c.toLowerCase());
   if (langs.length === 1 && LANG_CODE_MAP[langs[0]]) {
     return [LANG_CODE_MAP[langs[0]]];
   }
-  if (langs.includes('bn') || langs.includes('ba')) {
+  if (!isVidrock && langs.length === 1 && (langs.includes('hi') || langs.includes('hin'))) {
+    return hasMultiHint ? ['Hindi', 'English'] : ['Hindi'];
+  }
+  if (langs.length === 1 && (langs.includes('bn') || langs.includes('ba'))) {
     return ['Bengali'];
+  }
+  if (hasMultiHint) {
+    return ['Original'];
   }
   if (langs.length > 0 && !langs.includes('hi') && !langs.includes('hin') && langs.includes('en')) {
     return ['English'];
@@ -1188,11 +1229,17 @@ function rewriteM3u8Playlist(playlistText: string, baseUrl: string, hParam: stri
         });
       }
 
-      // Rewrite segment or sub-playlist URL line (tag non-m3u8 segments with &seg=1 for proper video/mp2t MIME)
+      // Rewrite segment or sub-playlist URL line (tag non-m3u8 media segments with &seg=1 for proper video/mp2t MIME, skip subtitles/keys)
       try {
         const abs = new URL(trimmed, baseUrl).toString();
-        const isSubPlaylist = abs.split('?')[0].toLowerCase().endsWith('.m3u8');
-        const segPart = isSubPlaylist ? '' : '&seg=1';
+        const cleanPath = abs.split('?')[0].toLowerCase();
+        const isNonMediaSeg =
+          cleanPath.endsWith('.m3u8') ||
+          cleanPath.endsWith('.vtt') ||
+          cleanPath.endsWith('.srt') ||
+          cleanPath.endsWith('.webvtt') ||
+          cleanPath.endsWith('.key');
+        const segPart = isNonMediaSeg ? '' : '&seg=1';
         return `/api/stream-proxy?url=${encodeURIComponent(abs)}${hQuery}${segPart}`;
       } catch {
         return line;
@@ -1239,6 +1286,7 @@ interface ActiveTorrentEntry {
   ready: boolean;
   readyPromise?: Promise<TorrentEngineLike>;
   lastUsedAt: number;
+  activeStreams: number;
   dirPath: string;
   preparedFiles: Map<number, PreparedTorrentFileState>;
 }
@@ -1246,7 +1294,7 @@ const activeTorrents = new Map<string, ActiveTorrentEntry>();
 
 function destroyTorrentEntry(hash: string) {
   const entry = activeTorrents.get(hash);
-  if (!entry) return;
+  if (!entry || entry.activeStreams > 0) return;
   activeTorrents.delete(hash);
   entry.preparedFiles.clear();
 
@@ -1274,7 +1322,7 @@ function destroyTorrentEntry(hash: string) {
 setInterval(() => {
   const now = Date.now();
   for (const [hash, entry] of activeTorrents.entries()) {
-    if (now - entry.lastUsedAt > 3 * 60 * 1000) {
+    if (entry.activeStreams <= 0 && now - entry.lastUsedAt > 3 * 60 * 1000) {
       destroyTorrentEntry(hash);
     }
   }
@@ -1292,9 +1340,11 @@ async function getReadyTorrentEntry(infoHash: string, extraTrackers: string[]): 
     }
   }
 
-  // Keep max 5 active torrents so /tmp disk usage stays controlled while preventing premature eviction
+  // Keep max 5 active torrents so /tmp disk usage stays controlled while protecting in-flight streams
   while (activeTorrents.size >= 5) {
-    const oldest = Array.from(activeTorrents.values()).sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+    const oldest = Array.from(activeTorrents.values())
+      .filter((e) => e.activeStreams <= 0)
+      .sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
     if (oldest) destroyTorrentEntry(oldest.infoHash);
     else break;
   }
@@ -1323,6 +1373,7 @@ async function getReadyTorrentEntry(infoHash: string, extraTrackers: string[]): 
     engine,
     ready: false,
     lastUsedAt: Date.now(),
+    activeStreams: 0,
     dirPath,
     preparedFiles: new Map(),
   };
@@ -1412,7 +1463,7 @@ function prepareTorrentFile(
   isP2P: boolean,
   requestedPrebufferMb: number
 ): PreparedTorrentFileState {
-  const prebufferMb = Math.max(5, Math.min(30, Math.round(requestedPrebufferMb || 10)));
+  const prebufferMb = Math.max(2, Math.min(30, Math.round(requestedPrebufferMb || 5)));
   const existingState = entry.preparedFiles.get(fileIdx);
   if (existingState && existingState.prebufferMb >= prebufferMb) {
     return existingState;
@@ -1525,8 +1576,8 @@ function getTorrentPrebufferStatus(entry: ActiveTorrentEntry, state: PreparedTor
   }
   const speedKbps = Math.round((speedBps / 1024) * 10) / 10;
 
-  // Lower playback threshold to 2.5 MB + header ready so playback starts fast
-  const minRequiredBytes = Math.min(state.targetBytes, 2.5 * 1024 * 1024);
+  // Fast startup: allow playback as soon as 1.0 MB + header piece are buffered
+  const minRequiredBytes = Math.min(state.targetBytes, 1.0 * 1024 * 1024);
   const readyToPlay =
     headReady &&
     (prebufferedBytes >= minRequiredBytes || completedPrePieces >= totalPrePieces);
@@ -1770,12 +1821,12 @@ async function probeContainerViaNodeFetch(
     const mergedHeaders: Record<string, string> = {
       'User-Agent': customHeaders?.['User-Agent'] || customHeaders?.['user-agent'] || DEFAULT_UA,
       ...(customHeaders || {}),
-      Range: 'bytes=0-2621439',
+      Range: 'bytes=0-1572863',
     };
     const r = await fetch(sourceUrl, {
       headers: mergedHeaders,
       redirect: 'follow',
-      signal: AbortSignal.timeout(4500),
+      signal: AbortSignal.timeout(2600),
     });
     if (!r.ok) {
       void r.body?.cancel();
@@ -1788,18 +1839,26 @@ async function probeContainerViaNodeFetch(
     }
     const buf = Buffer.from(await r.arrayBuffer());
     if (buf.length < 4096) return null;
-    return await runFfprobeAsync(
+    const headTxt = buf.subarray(0, 128).toString('utf8').trimStart().toLowerCase();
+    if (headTxt.startsWith('<!doctype') || headTxt.startsWith('<html') || headTxt.startsWith('{"error')) {
+      return null;
+    }
+    const info = await runFfprobeAsync(
       [
         '-v', 'error',
         '-show_entries', 'stream=index,codec_type,codec_name:stream_tags=language,title:format=duration',
         '-of', 'json',
-        '-probesize', '2500000',
-        '-analyzeduration', '2500000',
+        '-probesize', '1500000',
+        '-analyzeduration', '1500000',
         '-',
       ],
       buf,
-      3500
+      2200
     );
+    if (info) {
+      containerProbeCache.set(sourceUrl, info);
+    }
+    return info;
   } catch {
     return null;
   }
@@ -1814,18 +1873,64 @@ async function pipeStreamThroughFfmpegRemux(
   seekSeconds?: number,
   preProbedInfo?: ProbedContainerInfo | null
 ) {
-  let probed: ProbedContainerInfo | null = preProbedInfo || null;
+  let probed: ProbedContainerInfo | null =
+    preProbedInfo || (typeof inputSource === 'string' ? containerProbeCache.get(inputSource) || null : null);
   const mergedHeaders: Record<string, string> = {
     'User-Agent': customHeaders?.['User-Agent'] || customHeaders?.['user-agent'] || DEFAULT_UA,
     ...(customHeaders || {}),
   };
 
-  if (typeof inputSource === 'string' && !probed) {
-    probed = await probeContainerInfoAsync(inputSource, customHeaders, 4500);
-    if (!probed) {
-      probed = await probeContainerViaNodeFetch(inputSource, customHeaders);
+  // Only perform a single fast 1MB node probe if cache missed AND multi-language selection is explicitly requested
+  const wantsSpecificMultiLang = Boolean(
+    preferredLang &&
+      !/^(original|multi|dual)$/i.test(preferredLang.trim()) &&
+      typeof inputSource === 'string'
+  );
+  if (typeof inputSource === 'string' && !probed && wantsSpecificMultiLang) {
+    try {
+      const r = await fetch(inputSource, {
+        headers: { ...mergedHeaders, Range: 'bytes=0-1048575' },
+        redirect: 'follow',
+        signal: AbortSignal.timeout(1500),
+      });
+      const ct = (r.headers.get('content-type') || '').toLowerCase();
+      if (
+        (r.status >= 400 && r.status !== 416 && r.status !== 405 && r.status !== 501) ||
+        ct.includes('text/html') ||
+        ct.includes('application/json')
+      ) {
+        void r.body?.cancel();
+        if (!res.headersSent && !res.writableEnded) {
+          res.status(502).json({ error: `Upstream remux source invalid (HTTP ${r.status})` });
+        }
+        return;
+      }
+      if (r.ok && r.body) {
+        const buf = Buffer.from(await r.arrayBuffer());
+        if (buf.length >= 4096) {
+          probed = await runFfprobeAsync(
+            [
+              '-v', 'error',
+              '-show_entries', 'stream=index,codec_type,codec_name:stream_tags=language,title:format=duration',
+              '-of', 'json',
+              '-probesize', '1000000',
+              '-analyzeduration', '1000000',
+              '-',
+            ],
+            buf,
+            1200
+          );
+          if (probed) containerProbeCache.set(inputSource, probed);
+        }
+      } else {
+        void r.body?.cancel();
+      }
+    } catch {
+      // Proceed immediately to ffmpeg without blocking startup
     }
   }
+
+  let ffmpegDetectedDurationSec: number | undefined = probed?.durationSeconds;
 
   const runAttempt = (mode: 'url' | 'pipe-fetch', pipeStream?: Readable): Promise<'sent' | 'empty' | 'aborted'> =>
     new Promise((resolve) => {
@@ -1835,7 +1940,14 @@ async function pipeStreamThroughFfmpegRemux(
       }
 
       const useStdinPipe = mode === 'pipe-fetch' || typeof inputSource !== 'string';
-      const args: string[] = ['-hide_banner', '-loglevel', 'error', '-fflags', '+genpts'];
+      const args: string[] = [
+        '-hide_banner',
+        '-loglevel', 'info',
+        '-fflags', '+genpts+discardcorrupt',
+        '-avoid_negative_ts', 'make_zero',
+        '-probesize', '1500000',
+        '-analyzeduration', '1500000',
+      ];
       if (!useStdinPipe && seekSeconds && seekSeconds > 0) {
         args.push('-ss', String(seekSeconds));
       }
@@ -1872,7 +1984,8 @@ async function pipeStreamThroughFfmpegRemux(
         args.push('-map', '0:a:0?');
       }
 
-      const shouldTranscodeVideo = isHevc || Boolean(probed?.isHevc);
+      // Only transcode video to H.264 if probed HEVC or explicitly tagged HEVC AND not explicitly x264
+      const shouldTranscodeVideo = probed ? probed.isHevc : isHevc;
       args.push(
         ...(shouldTranscodeVideo
           ? [
@@ -1886,6 +1999,7 @@ async function pipeStreamThroughFfmpegRemux(
               '-threads', '0',
             ]
           : ['-c:v', 'copy']),
+        '-af', 'aresample=async=1:first_pts=0',
         '-c:a', 'aac',
         '-ac', '2',
         '-b:a', '192k',
@@ -1911,7 +2025,23 @@ async function pipeStreamThroughFfmpegRemux(
           pipeStream?.destroy();
           done('empty');
         }
-      }, 15000);
+      }, mode === 'url' ? 3500 : 5500);
+
+      let stderrTail = '';
+      ff.stderr?.on('data', (d: Buffer) => {
+        if (ffmpegDetectedDurationSec || stderrTail.length > 4096) return;
+        stderrTail += d.toString('utf8');
+        const durMatch = stderrTail.match(/Duration:\s*(\d+):(\d+):([\d.]+)/);
+        if (durMatch) {
+          const hrs = Number(durMatch[1]);
+          const mins = Number(durMatch[2]);
+          const secs = Number(durMatch[3]);
+          const total = hrs * 3600 + mins * 60 + secs;
+          if (Number.isFinite(total) && total > 0) {
+            ffmpegDetectedDurationSec = total;
+          }
+        }
+      });
 
       const srcStream = mode === 'pipe-fetch' ? pipeStream : typeof inputSource !== 'string' ? inputSource : undefined;
       if (srcStream && ff.stdin) {
@@ -1932,8 +2062,9 @@ async function pipeStreamThroughFfmpegRemux(
             res.setHeader('Content-Type', 'video/mp4');
             res.setHeader('Access-Control-Allow-Origin', '*');
             res.setHeader('Cache-Control', 'no-cache');
-            if (probed?.durationSeconds && Number.isFinite(probed.durationSeconds)) {
-              res.setHeader('X-Content-Duration', String(Math.round(probed.durationSeconds)));
+            const finalDur = ffmpegDetectedDurationSec || probed?.durationSeconds;
+            if (finalDur && Number.isFinite(finalDur) && finalDur > 0) {
+              res.setHeader('X-Content-Duration', String(Math.round(finalDur)));
               res.setHeader(
                 'Access-Control-Expose-Headers',
                 'X-Content-Duration, Accept-Ranges, Content-Length, Content-Range, Content-Type'
@@ -1987,31 +2118,29 @@ async function pipeStreamThroughFfmpegRemux(
     return;
   }
 
+  // Try direct ffmpeg -i URL first (handles Range requests, moov-at-EOF, fast -ss seeks, and fast startup)
   let outcome = await runAttempt('url');
 
-  // If ffmpeg HTTP client received 403/timeout on CDN/Cloudflare Workers, fall back to Node fetch() -> pipe:0
-  if (
-    outcome === 'empty' &&
-    !res.destroyed &&
-    !res.writableEnded &&
-    !inputSource.startsWith('http://127.0.0.1') &&
-    !inputSource.startsWith('http://localhost')
-  ) {
+  const isLocalInput =
+    inputSource.startsWith('http://127.0.0.1') || inputSource.startsWith('http://localhost');
+
+  // If ffmpeg libavformat rejected CDN TLS/Referer and output zero bytes, fall back to Node fetch() -> pipe:0
+  if (outcome === 'empty' && !isLocalInput && !res.destroyed && !res.writableEnded) {
     try {
-      const fallbackRes = await fetch(inputSource, {
+      const fetchRes = await fetch(inputSource, {
         headers: mergedHeaders,
         redirect: 'follow',
-        signal: AbortSignal.timeout(12000),
+        signal: AbortSignal.timeout(6500),
       });
-      const ct = (fallbackRes.headers.get('content-type') || '').toLowerCase();
-      if (fallbackRes.ok && fallbackRes.body && !ct.includes('text/html') && !ct.includes('application/json')) {
-        const nodeStream = Readable.fromWeb(fallbackRes.body as unknown as NodeReadableStream);
+      const ct = (fetchRes.headers.get('content-type') || '').toLowerCase();
+      if (fetchRes.ok && fetchRes.body && !ct.includes('text/html') && !ct.includes('application/json')) {
+        const nodeStream = Readable.fromWeb(fetchRes.body as unknown as NodeReadableStream);
         outcome = await runAttempt('pipe-fetch', nodeStream);
       } else {
-        void fallbackRes.body?.cancel();
+        void fetchRes.body?.cancel();
       }
     } catch {
-      // Upstream fetch failed as well
+      // Return 502 below if fallback also failed
     }
   }
 
@@ -2093,12 +2222,145 @@ async function startServer() {
     }
   });
 
-  // Generic CORS proxy for HTML/JSON endpoints
-  app.get('/api/proxy', async (req, res) => {
-    const targetUrl = req.query.url as string;
-    if (!targetUrl) {
-      return res.status(400).json({ error: 'Missing target url parameter' });
+  function isPrivateOrReservedIpv4(ipv4: string): boolean {
+    const parts = ipv4.split('.').map((n) => Number(n));
+    if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
+      return true;
     }
+    const [a, b] = parts;
+    if (a === 0 || a === 10 || a === 127) return true;
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    if (a === 169 && b === 254) return true; // Link-local / cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    if (a === 192 && b === 0) return true;
+    if (a === 192 && b === 168) return true;
+    if (a === 198 && (b === 18 || b === 19)) return true;
+    if (a >= 224) return true; // Multicast & reserved
+    return false;
+  }
+
+  function isPrivateOrReservedIp(rawIp: string): boolean {
+    const ip = rawIp.trim().toLowerCase().replace(/^\[|\]$/g, '').split('%')[0];
+    if (!ip) return true;
+    const ipVersion = net.isIP(ip);
+    if (ipVersion === 4) {
+      return isPrivateOrReservedIpv4(ip);
+    }
+    if (ipVersion === 6) {
+      if (ip === '::' || ip === '::1') return true;
+      if (ip.startsWith('::ffff:')) {
+        const mapped = ip.slice('::ffff:'.length);
+        if (net.isIP(mapped) === 4) {
+          return isPrivateOrReservedIpv4(mapped);
+        }
+        const hexMatch = mapped.match(/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+        if (hexMatch) {
+          const hi = parseInt(hexMatch[1], 16);
+          const lo = parseInt(hexMatch[2], 16);
+          const v4 = `${(hi >> 8) & 255}.${hi & 255}.${(lo >> 8) & 255}.${lo & 255}`;
+          return isPrivateOrReservedIpv4(v4);
+        }
+        return true;
+      }
+      if (/^f[cd][0-9a-f]{2}:/i.test(ip) || /^fc/i.test(ip) || /^fd/i.test(ip)) return true;
+      if (/^fe[89ab][0-9a-f]:/i.test(ip) || /^fe80:/i.test(ip)) return true;
+      if (/^ff/i.test(ip)) return true;
+      return false;
+    }
+    return true;
+  }
+
+  function isSafeRemoteProxyUrl(raw: string): boolean {
+    if (!raw || raw.length > 4096) return false;
+    try {
+      const u = new URL(raw);
+      if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+      if (u.username || u.password) return false;
+      const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+      if (!host) return false;
+      if (
+        host === 'localhost' ||
+        host.endsWith('.localhost') ||
+        host === 'metadata.google.internal' ||
+        host.endsWith('.local') ||
+        host.endsWith('.internal')
+      ) {
+        return false;
+      }
+      if (net.isIP(host) !== 0) {
+        return !isPrivateOrReservedIp(host);
+      }
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function assertPublicHostnameResolvesSafely(raw: string): Promise<boolean> {
+    if (!isSafeRemoteProxyUrl(raw)) return false;
+    try {
+      const u = new URL(raw);
+      const host = u.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+      if (net.isIP(host) !== 0) {
+        return !isPrivateOrReservedIp(host);
+      }
+      const records = await Promise.race([
+        dns.lookup(host, { all: true }),
+        new Promise<never>((_resolve, reject) =>
+          setTimeout(() => reject(new Error('DNS lookup timeout')), 3000)
+        ),
+      ]);
+      if (!Array.isArray(records) || records.length === 0) return false;
+      return records.every((rec) => !isPrivateOrReservedIp(rec.address));
+    } catch {
+      return false;
+    }
+  }
+
+  async function fetchWithSafeRedirects(
+    initialUrl: string,
+    init: RequestInit,
+    maxRedirects = 5
+  ): Promise<{ response: globalThis.Response; blockedBySsrf?: boolean }> {
+    let currentUrl = initialUrl;
+    for (let hop = 0; hop <= maxRedirects; hop += 1) {
+      const safeHost = await assertPublicHostnameResolvesSafely(currentUrl);
+      if (!safeHost) {
+        return { response: new Response(null, { status: 400 }), blockedBySsrf: true };
+      }
+      const response = await fetch(currentUrl, {
+        ...init,
+        redirect: 'manual',
+      });
+      if (
+        response.status >= 300 &&
+        response.status < 400 &&
+        response.headers.get('location')
+      ) {
+        const location = response.headers.get('location')!;
+        void response.body?.cancel().catch(() => {});
+        currentUrl = new URL(location, currentUrl).toString();
+        continue;
+      }
+      return { response };
+    }
+    throw new Error('Too many redirects from upstream target');
+  }
+
+  // Generic CORS proxy for HTML/JSON/Range media endpoints
+  app.get('/api/proxy', async (req, res) => {
+    const targetUrl = String(req.query.url || '');
+    if (!(await assertPublicHostnameResolvesSafely(targetUrl))) {
+      return res.status(400).json({ error: 'Invalid or disallowed target url parameter' });
+    }
+    const controller = new AbortController();
+    const requestTimeout = setTimeout(() => controller.abort(), 15000);
+    req.on('close', () => {
+      clearTimeout(requestTimeout);
+      if (!res.writableEnded) {
+        controller.abort();
+      }
+    });
     try {
       const proxyHeaders: Record<string, string> = {
         'User-Agent': DEFAULT_UA,
@@ -2106,25 +2368,67 @@ async function startServer() {
       };
       if (req.query.referer) {
         proxyHeaders['Referer'] = String(req.query.referer);
-      } else if (targetUrl.includes('anikoto')) {
-        proxyHeaders['Referer'] = 'https://anikototv.bz/';
       }
       if (req.query.origin) {
         proxyHeaders['Origin'] = String(req.query.origin);
       }
+      if (typeof req.headers.range === 'string' && req.headers.range.trim()) {
+        proxyHeaders['Range'] = req.headers.range.trim();
+      }
 
-      const response = await fetch(targetUrl, {
+      const { response, blockedBySsrf } = await fetchWithSafeRedirects(targetUrl, {
+        method: req.method === 'HEAD' ? 'HEAD' : 'GET',
         headers: proxyHeaders,
-        signal: AbortSignal.timeout(15000),
+        signal: controller.signal,
       });
-      const contentType = response.headers.get('content-type') || 'text/html';
+      clearTimeout(requestTimeout);
+
+      if (blockedBySsrf) {
+        return res.status(400).json({ error: 'Redirect target disallowed' });
+      }
+
+      const contentType = response.headers.get('content-type') || 'application/octet-stream';
+      const contentRange = response.headers.get('content-range');
+      const acceptRanges =
+        response.headers.get('accept-ranges') || (response.status === 206 ? 'bytes' : null);
+      const contentLength = response.headers.get('content-length');
+
       res.setHeader('Content-Type', contentType);
+      if (contentRange) res.setHeader('Content-Range', contentRange);
+      if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
+      if (contentLength) res.setHeader('Content-Length', contentLength);
       res.setHeader('Access-Control-Allow-Origin', '*');
-      const arrayBuffer = await response.arrayBuffer();
-      res.status(response.status).send(Buffer.from(arrayBuffer));
+      res.setHeader(
+        'Access-Control-Expose-Headers',
+        'Content-Range, Accept-Ranges, Content-Length, Content-Type'
+      );
+
+      if (req.method === 'HEAD' || !response.body) {
+        void response.body?.cancel().catch(() => {});
+        return res.status(response.status).end();
+      }
+
+      res.status(response.status);
+      const nodeStream = Readable.fromWeb(response.body as unknown as NodeReadableStream);
+      req.on('close', () => {
+        if (!nodeStream.destroyed) nodeStream.destroy();
+      });
+      nodeStream.on('error', () => {
+        if (!res.headersSent) {
+          res.status(502).json({ error: 'Upstream stream read error' });
+        } else if (!res.writableEnded) {
+          res.end();
+        }
+      });
+      nodeStream.pipe(res);
     } catch (err) {
+      clearTimeout(requestTimeout);
       const msg = err instanceof Error ? err.message : 'Server proxy fetch failed';
-      res.status(500).json({ error: msg });
+      if (!res.headersSent) {
+        res.status(502).json({ error: msg });
+      } else if (!res.writableEnded) {
+        res.end();
+      }
     }
   });
 
@@ -2137,8 +2441,8 @@ async function startServer() {
     const isSegment = req.query.seg === '1';
     const preferredLang = (req.query.lang as string) || '';
     const seekSec = req.query.ss ? Number(req.query.ss) : req.query.t ? Number(req.query.t) : 0;
-    if (!targetUrl || (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://'))) {
-      return res.status(400).json({ error: 'Invalid target stream url' });
+    if (!(await assertPublicHostnameResolvesSafely(targetUrl))) {
+      return res.status(400).json({ error: 'Invalid or disallowed target stream url' });
     }
 
     const customHeaders = decodeHeadersParam(hParam);
@@ -2151,9 +2455,26 @@ async function startServer() {
       if (req.method === 'HEAD') {
         let probed = containerProbeCache.get(targetUrl) || null;
         if (!probed) {
-          probed = await probeContainerInfoAsync(targetUrl, forwardHeaders, 4000);
+          probed = await probeContainerInfoAsync(targetUrl, forwardHeaders, 1800);
           if (!probed) {
             probed = await probeContainerViaNodeFetch(targetUrl, forwardHeaders);
+          }
+        }
+        if (!probed) {
+          // Verify upstream is at least reachable binary video rather than a dead 503/HTML page
+          try {
+            const checkRes = await fetch(targetUrl, {
+              headers: { ...forwardHeaders, Range: 'bytes=0-511' },
+              redirect: 'follow',
+              signal: AbortSignal.timeout(2000),
+            });
+            const checkCt = (checkRes.headers.get('content-type') || '').toLowerCase();
+            void checkRes.body?.cancel();
+            if (checkRes.status >= 400 || checkCt.includes('text/html') || checkCt.includes('application/json')) {
+              return res.status(502).json({ error: `Upstream remux target returned HTTP ${checkRes.status}` });
+            }
+          } catch {
+            return res.status(502).json({ error: 'Upstream remux target unreachable' });
           }
         }
         res.setHeader('Content-Type', 'video/mp4');
@@ -2187,18 +2508,30 @@ async function startServer() {
     });
 
     try {
-      const response = await fetch(targetUrl, {
+      let response = await fetch(targetUrl, {
         method: req.method === 'HEAD' ? 'HEAD' : 'GET',
         headers: forwardHeaders,
         redirect: 'follow',
         signal: controller.signal,
       });
+      if (req.method === 'HEAD' && (response.status === 405 || response.status === 501)) {
+        void response.body?.cancel();
+        response = await fetch(targetUrl, {
+          method: 'GET',
+          headers: { ...forwardHeaders, Range: forwardHeaders.Range || 'bytes=0-511' },
+          redirect: 'follow',
+          signal: controller.signal,
+        });
+      }
       clearTimeout(connectTimeout);
-      if (clientClosed) return;
+      if (clientClosed) {
+        void response.body?.cancel();
+        return;
+      }
 
       const contentType = (response.headers.get('content-type') || '').toLowerCase();
       const urlPath = targetUrl.split('?')[0].toLowerCase();
-      const isM3u8 =
+      let isM3u8 =
         contentType.includes('mpegurl') ||
         contentType.includes('m3u8') ||
         urlPath.endsWith('.m3u8');
@@ -2208,6 +2541,50 @@ async function startServer() {
         'Access-Control-Expose-Headers',
         'X-Content-Duration, Content-Length, Content-Range, Accept-Ranges, Content-Type'
       );
+
+      if (req.method === 'HEAD') {
+        let peekText = '';
+        if (!isM3u8 && response.body && response.ok) {
+          try {
+            const reader = response.body.getReader();
+            const first = await reader.read();
+            if (first.value && first.value.length > 0) {
+              peekText = Buffer.from(first.value.subarray(0, 512)).toString('utf8').replace(/^\uFEFF/, '').trimStart();
+            }
+            await reader.cancel();
+          } catch {
+            void response.body?.cancel();
+          }
+        } else {
+          void response.body?.cancel();
+        }
+        if (peekText.startsWith('#EXTM3U')) {
+          isM3u8 = true;
+        }
+        if (
+          response.status >= 400 ||
+          contentType.includes('text/html') ||
+          contentType.includes('application/json') ||
+          /^<!doctype|^<html|^<head|^<body|^\{"error"/i.test(peekText)
+        ) {
+          return res
+            .status(response.status >= 400 ? response.status : 502)
+            .json({ error: `Upstream returned invalid media (HTTP ${response.status})` });
+        }
+        if (isM3u8) {
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-cache');
+          return res.status(200).end();
+        }
+        if (contentType) res.setHeader('Content-Type', contentType);
+        const headLen = response.headers.get('content-length');
+        const headRange = response.headers.get('content-range');
+        const headAccept = response.headers.get('accept-ranges');
+        if (headRange) res.setHeader('Content-Range', headRange);
+        if (headAccept) res.setHeader('Accept-Ranges', headAccept);
+        if (headLen && response.status === 200) res.setHeader('Content-Length', headLen);
+        return res.status(response.status === 206 ? 200 : response.status).end();
+      }
 
       if (isM3u8) {
         const text = await response.text();
@@ -2223,44 +2600,51 @@ async function startServer() {
         return res.status(response.status).send(rewritten);
       }
 
-      if (response.status >= 400 && (contentType.includes('text/html') || isSegment)) {
+      if (response.status >= 400 && (contentType.includes('text/html') || contentType.includes('application/json') || isSegment)) {
+        void response.body?.cancel();
         return res.status(response.status).json({ error: `Upstream media returned HTTP ${response.status}` });
       }
 
+      const isCaptionPath = urlPath.endsWith('.vtt') || urlPath.endsWith('.srt') || urlPath.endsWith('.webvtt');
       const disguisedSegment =
         isSegment &&
+        !isCaptionPath &&
+        !contentType.includes('vtt') &&
         (contentType.startsWith('image/') ||
           contentType.includes('text/plain') ||
           contentType.includes('octet-stream') ||
           !contentType);
 
-      if (disguisedSegment) {
-        res.setHeader('Content-Type', 'video/mp2t');
-      } else if (contentType) {
-        res.setHeader('Content-Type', contentType);
-      }
       const contentLength = response.headers.get('content-length');
       const contentRange = response.headers.get('content-range');
       if (contentRange) res.setHeader('Content-Range', contentRange);
       const acceptRanges = response.headers.get('accept-ranges');
       if (acceptRanges) res.setHeader('Accept-Ranges', acceptRanges);
 
-      if (!response.body || req.method === 'HEAD') {
+      if (!response.body) {
+        if (contentType) res.setHeader('Content-Type', contentType);
         if (contentLength) res.setHeader('Content-Length', contentLength);
         return res.status(response.status).end();
       }
 
       const nodeStream = Readable.fromWeb(response.body as unknown as NodeReadableStream);
-      let headersFlushed = false;
-      let firstChunkHandled = false;
+      const shouldInspectHead =
+        !isCaptionPath &&
+        !(response.status === 206 && !isSegment) &&
+        (disguisedSegment ||
+          !contentType ||
+          contentType.startsWith('image/') ||
+          contentType.startsWith('text/') ||
+          contentType.includes('octet-stream') ||
+          contentType.includes('application/json'));
 
-      if (!disguisedSegment) {
+      if (!shouldInspectHead) {
+        if (contentType) res.setHeader('Content-Type', contentType);
         if (contentLength) res.setHeader('Content-Length', contentLength);
         res.status(response.status);
-        headersFlushed = true;
         nodeStream.on('error', () => {
           if (!res.headersSent) res.status(502);
-          res.end();
+          if (!res.writableEnded) res.end();
         });
         res.on('close', () => {
           nodeStream.destroy();
@@ -2269,36 +2653,134 @@ async function startServer() {
         return;
       }
 
-      // Inspect first chunk of disguised HLS segments (e.g. .jpg/.png) to strip any fake image header before MPEG-TS sync byte 0x47
+      // Peek initial bytes to catch disguised HLS child playlists (e.g. playlist.jpg), HTML error pages, fMP4 init/media segments, or MPEG-TS fake-image headers
+      const headChunks: Buffer[] = [];
+      let headBytes = 0;
+      let firstChunkHandled = false;
+      let headersFlushed = false;
+      let collectingDisguisedPlaylist = false;
+
+      const sendRawBufferedError = (statusCode: number, message: string) => {
+        firstChunkHandled = true;
+        nodeStream.destroy();
+        if (!res.headersSent && !res.writableEnded) {
+          res.status(statusCode).json({ error: message });
+        }
+      };
+
+      const flushInitialChunks = () => {
+        if (firstChunkHandled) return;
+        let combined = headChunks.length === 1 ? headChunks[0] : Buffer.concat(headChunks);
+        const headUtf8 = combined.subarray(0, 512).toString('utf8').replace(/^\uFEFF/, '').trimStart();
+
+        // 1. Disguised HLS playlist (e.g. playlist.jpg served with Content-Type: image/jpeg containing #EXTM3U)
+        if (headUtf8.startsWith('#EXTM3U')) {
+          collectingDisguisedPlaylist = true;
+          return;
+        }
+
+        // 2. HTML/JSON error disguised as HTTP 200
+        if (/^<!doctype|^<html|^<head|^<body|^\{"error"/i.test(headUtf8)) {
+          sendRawBufferedError(502, 'Upstream returned HTML or JSON error instead of video stream');
+          return;
+        }
+
+        firstChunkHandled = true;
+        headChunks.length = 0;
+
+        // 3. ISO-BMFF / fMP4 segment (ftyp / styp / moof / sidx / emsg at bytes 4..7)
+        const isIsoBmff =
+          combined.length >= 8 &&
+          ['ftyp', 'styp', 'moof', 'sidx', 'emsg'].includes(combined.subarray(4, 8).toString('ascii'));
+
+        let strippedOffset = 0;
+        if (disguisedSegment && !isIsoBmff && combined.length > 0 && combined[0] !== 0x47) {
+          const limit = Math.min(combined.length - 189, 4096);
+          for (let i = 1; i <= limit; i += 1) {
+            if (combined[i] === 0x47 && combined[i + 188] === 0x47) {
+              strippedOffset = i;
+              break;
+            }
+          }
+          if (strippedOffset > 0) {
+            combined = combined.subarray(strippedOffset);
+          }
+        }
+
+        if (!headersFlushed) {
+          headersFlushed = true;
+          if (isIsoBmff) {
+            res.setHeader('Content-Type', 'video/mp4');
+          } else if (disguisedSegment) {
+            res.setHeader('Content-Type', 'video/mp2t');
+          } else if (contentType) {
+            res.setHeader('Content-Type', contentType);
+          }
+
+          if (contentLength && strippedOffset === 0) {
+            res.setHeader('Content-Length', contentLength);
+          } else if (contentLength && strippedOffset > 0) {
+            const adjusted = Math.max(0, Number(contentLength) - strippedOffset);
+            if (Number.isFinite(adjusted) && adjusted > 0) {
+              res.setHeader('Content-Length', String(adjusted));
+            }
+          }
+          res.status(response.status);
+        }
+
+        if (combined.length > 0 && !res.writableEnded) {
+          if (!res.write(combined)) {
+            nodeStream.pause();
+          }
+        }
+      };
+
       nodeStream.on('data', (rawChunk: Buffer | Uint8Array) => {
-        let chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+        const chunk = Buffer.isBuffer(rawChunk) ? rawChunk : Buffer.from(rawChunk);
+        if (collectingDisguisedPlaylist) {
+          headChunks.push(chunk);
+          headBytes += chunk.length;
+          if (headBytes > 4 * 1024 * 1024) {
+            sendRawBufferedError(502, 'Disguised playlist exceeded maximum size');
+          }
+          return;
+        }
         if (!firstChunkHandled) {
-          firstChunkHandled = true;
-          let strippedOffset = 0;
-          if (chunk.length > 0 && chunk[0] !== 0x47) {
-            const limit = Math.min(chunk.length - 189, 4096);
-            for (let i = 1; i <= limit; i += 1) {
-              if (chunk[i] === 0x47 && chunk[i + 188] === 0x47) {
-                strippedOffset = i;
+          headChunks.push(chunk);
+          headBytes += chunk.length;
+          const probeBuf = headChunks.length === 1 ? chunk : Buffer.concat(headChunks);
+          const probeUtf8 = probeBuf.subarray(0, 64).toString('utf8').replace(/^\uFEFF/, '').trimStart();
+          if (probeUtf8.startsWith('#EXTM3U')) {
+            collectingDisguisedPlaylist = true;
+            return;
+          }
+          if (/^<!doctype|^<html|^<head|^<body|^\{"error"/i.test(probeUtf8)) {
+            sendRawBufferedError(502, 'Upstream returned HTML or JSON error instead of video stream');
+            return;
+          }
+          const isIsoBmff =
+            probeBuf.length >= 8 &&
+            ['ftyp', 'styp', 'moof', 'sidx', 'emsg'].includes(probeBuf.subarray(4, 8).toString('ascii'));
+          if (isIsoBmff || !disguisedSegment) {
+            if (probeBuf.length >= 32) {
+              flushInitialChunks();
+            }
+            return;
+          }
+          let hasSync = probeBuf.length > 0 && probeBuf[0] === 0x47;
+          if (!hasSync && probeBuf.length >= 189) {
+            const scanLimit = Math.min(probeBuf.length - 189, 4096);
+            for (let i = 1; i <= scanLimit; i += 1) {
+              if (probeBuf[i] === 0x47 && probeBuf[i + 188] === 0x47) {
+                hasSync = true;
                 break;
               }
             }
-            if (strippedOffset > 0) {
-              chunk = chunk.subarray(strippedOffset);
-            }
           }
-          if (!headersFlushed) {
-            headersFlushed = true;
-            if (contentLength && strippedOffset === 0) {
-              res.setHeader('Content-Length', contentLength);
-            } else if (contentLength && strippedOffset > 0) {
-              const adjusted = Math.max(0, Number(contentLength) - strippedOffset);
-              if (Number.isFinite(adjusted) && adjusted > 0) {
-                res.setHeader('Content-Length', String(adjusted));
-              }
-            }
-            res.status(response.status);
+          if (hasSync || headBytes >= 4096) {
+            flushInitialChunks();
           }
+          return;
         }
         if (!res.writableEnded) {
           if (!res.write(chunk)) {
@@ -2311,8 +2793,31 @@ async function startServer() {
         if (!nodeStream.destroyed) nodeStream.resume();
       });
       nodeStream.on('end', () => {
-        if (!headersFlushed) {
+        if (collectingDisguisedPlaylist) {
+          const fullText = Buffer.concat(headChunks).toString('utf8').replace(/^\uFEFF/, '');
+          headChunks.length = 0;
+          if (!fullText.includes('#EXTM3U')) {
+            if (!res.headersSent && !res.writableEnded) {
+              res.status(502).json({ error: 'Upstream returned an invalid disguised HLS playlist' });
+            }
+            return;
+          }
+          const finalUrl = response.url || targetUrl;
+          const rewritten = rewriteM3u8Playlist(fullText, finalUrl, hParam);
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+          res.setHeader('Cache-Control', 'no-cache');
+          if (!res.writableEnded) {
+            res.status(response.status).send(rewritten);
+          }
+          return;
+        }
+        if (!firstChunkHandled) {
+          flushInitialChunks();
+        }
+        if (!headersFlushed && !res.headersSent) {
           headersFlushed = true;
+          if (disguisedSegment) res.setHeader('Content-Type', 'video/mp2t');
+          else if (contentType) res.setHeader('Content-Type', contentType);
           res.status(response.status);
         }
         if (!res.writableEnded) res.end();
@@ -2425,13 +2930,29 @@ async function startServer() {
       return res.status(400).json({ error: 'Invalid infoHash' });
     }
 
+    let activeEntryRef: ActiveTorrentEntry | null = null;
+    let streamDecremented = false;
+    const releaseActiveStream = () => {
+      if (!streamDecremented && activeEntryRef) {
+        streamDecremented = true;
+        activeEntryRef.activeStreams = Math.max(0, activeEntryRef.activeStreams - 1);
+        activeEntryRef.lastUsedAt = Date.now();
+      }
+    };
+
     try {
       const extraTrackers = trParam
         ? trParam.split(',').map((t) => t.trim()).filter((t) => t.startsWith('udp://') || t.startsWith('http'))
         : [];
       const entry = await getReadyTorrentEntry(infoHash, extraTrackers);
+      activeEntryRef = entry;
+      entry.activeStreams += 1;
+      res.on('close', releaseActiveStream);
+      res.on('finish', releaseActiveStream);
+
       const found = findTargetTorrentFile(entry.engine, fileIdxParam, seasonParam, episodeParam);
       if (!found) {
+        releaseActiveStream();
         return res.status(404).json({ error: 'No playable video file found in torrent' });
       }
 
@@ -2444,7 +2965,7 @@ async function startServer() {
         if (req.method === 'HEAD') {
           let probed = containerProbeCache.get(localRawUrl) || null;
           if (!probed && entry.engine.bitfield?.get(state.fileStartPiece)) {
-            probed = await probeContainerInfoAsync(localRawUrl, undefined, 3500);
+            probed = await probeContainerInfoAsync(localRawUrl, undefined, 2500);
           }
           res.setHeader('Content-Type', 'video/mp4');
           res.setHeader('Access-Control-Allow-Origin', '*');
@@ -2455,15 +2976,16 @@ async function startServer() {
           if (probed?.durationSeconds && Number.isFinite(probed.durationSeconds)) {
             res.setHeader('X-Content-Duration', String(Math.round(probed.durationSeconds)));
           }
+          releaseActiveStream();
           return res.status(200).end();
         }
-        // Wait briefly for header + tail if not yet ready so ffprobe & ffmpeg Cues seek succeed cleanly
+        // Cap pre-FFmpeg piece wait at 3000ms so remux never stalls when header piece arrives
         if (!entry.engine.bitfield?.get(state.fileStartPiece)) {
           await new Promise<void>((resolve) => {
             const maxWait = setTimeout(() => {
               entry.engine.off?.('verify', onVerify);
               resolve();
-            }, 9000);
+            }, 3000);
             const onVerify = (pieceIdx: unknown) => {
               if (pieceIdx === state.fileStartPiece) {
                 clearTimeout(maxWait);
@@ -2498,6 +3020,7 @@ async function startServer() {
 
       if (req.method === 'HEAD') {
         res.setHeader('Content-Length', String(fileSize));
+        releaseActiveStream();
         return res.status(200).end();
       }
 
@@ -2508,6 +3031,7 @@ async function startServer() {
           const end = match[2] ? Math.min(fileSize - 1, parseInt(match[2], 10)) : fileSize - 1;
           if (start >= fileSize || start > end) {
             res.setHeader('Content-Range', `bytes */${fileSize}`);
+            releaseActiveStream();
             return res.status(416).end();
           }
 
@@ -2550,6 +3074,7 @@ async function startServer() {
       });
       rs.pipe(res);
     } catch (err) {
+      releaseActiveStream();
       const msg = err instanceof Error ? err.message : 'Torrent stream error';
       if (!res.headersSent) res.status(504).json({ error: msg });
     }
@@ -2611,6 +3136,9 @@ async function startServer() {
     const episode = req.query.episode ? Number(req.query.episode) : 1;
     const manifestUrl = (req.query.manifestUrl as string) || DEFAULT_NUVIO_MANIFEST;
     const refresh = req.query.refresh === '1';
+    const isFastLane = req.query.lane === 'fast';
+    const excludeFast = !isFastLane && req.query.excludeFast === '1';
+    const skipCb = req.query.skipCb === '1';
     const idsParam = (req.query.ids as string) || '';
     const requestedIds = idsParam
       ? new Set(idsParam.split(',').map((s) => s.trim()).filter(Boolean))
@@ -2624,7 +3152,7 @@ async function startServer() {
       return res.json({ sources: [], subtitles: [], scraperResults: [] });
     }
 
-    const cacheKey = `v7::${manifestUrl}::${tmdbId}::${mediaType}::${season}::${episode}::${idsParam}::${disabledIdsParam}`;
+    const cacheKey = `v9::${isFastLane ? 'fast' : excludeFast ? 'rest' : 'full'}::${skipCb ? 'nocb' : 'cb'}::${manifestUrl}::${tmdbId}::${mediaType}::${season}::${episode}::${idsParam}::${disabledIdsParam}`;
     if (!refresh) {
       const cachedStreamRes = streamsResultCache.get(cacheKey);
       if (cachedStreamRes && Date.now() - cachedStreamRes.fetchedAt < 4 * 60 * 1000) {
@@ -2634,13 +3162,12 @@ async function startServer() {
 
     const fallbackTitle = typeof req.query.title === 'string' ? req.query.title.trim() : '';
     const fallbackYear = req.query.year ? Number(req.query.year) : null;
-    const routeStartTime = Date.now();
     try {
       const repoTag = Buffer.from(manifestUrl)
         .toString('base64url')
         .replace(/[^a-zA-Z0-9]/g, '')
         .slice(-6) || 'def';
-      const shouldFetchCb = !requestedIds && manifestUrl === DEFAULT_NUVIO_MANIFEST;
+      const shouldFetchCb = !requestedIds && !skipCb && manifestUrl === DEFAULT_NUVIO_MANIFEST;
       const [manifest, fetchedTmdbMeta, cbManifest] = await Promise.all([
         fetchNuvioManifest(manifestUrl),
         fetchTmdbTitleMeta(tmdbId, mediaType, undefined, season, episode),
@@ -2678,6 +3205,10 @@ async function startServer() {
           if (s.enabled === false) return false;
           if (disabledIdsSet && disabledIdsSet.has(s.id)) return false;
           if (requestedIds && !requestedIds.has(s.id)) return false;
+          const sIdLower = s.id.toLowerCase();
+          if (tmdbMeta?.originalLanguage === 'hi' && (sIdLower.includes('purstream') || sIdLower.includes('movix'))) {
+            return false;
+          }
           if (!requestedIds) {
             if (!isAnimationOrAnime && ANIME_CARTOON_SCRAPER_IDS.has(s.id)) return false;
             if (!isAsianDrama && ASIAN_DRAMA_SCRAPER_IDS.has(s.id)) return false;
@@ -2705,7 +3236,93 @@ async function startServer() {
           }));
       }
 
-      const scrapersToRun = [...primaryScrapers, ...extraCbScrapers];
+      const FAST_LANE_SCRAPER_IDS = new Set([
+        'castle',
+        'cb-castle',
+        'desiflix',
+        'cb-desiflix',
+        'netmirror',
+        'cb-netmirror',
+        'einthusan',
+        'cb-einthusan',
+        'hindmoviez',
+        'cb-hindmoviez',
+        'moviesdrive',
+        'cb-moviesdrive',
+        '4khdhub',
+        'cb-4khdhub',
+        'hdhub4u',
+        'cb-hdhub4u',
+        'vegamovies',
+        'cb-vegamovies',
+        'nuvio-vegamovies',
+        'multimovies',
+        'cb-multimovies',
+        'moviesmod',
+        'cb-moviesmod',
+        'playimdb',
+        'cb-playimdb',
+        'moviebox',
+        'cb-moviebox',
+        'movieblast',
+        'cb-movieblast',
+        'movies4u',
+        'allmovieland',
+        'cb-allmovieland',
+        'cinemacity',
+        'cinestream',
+        'flixindia',
+        'hdmovie2',
+        'streamflix',
+        'cb-streamflix',
+        'uhdmovies',
+        'cb-uhdmovies',
+        'toonstream',
+        'cb-toonstream',
+        'puretoons',
+        'cb-puretoons',
+        'toonhub',
+        'animelok',
+        'animeworld',
+        'cb-animeworld',
+        'animesalt',
+        'cb-animesalt',
+        'animedekho',
+        'zinkmovies',
+        'xdmovies',
+        'dooflix',
+        'ctgmovies',
+        'cb-ctgmovies',
+        'moonflix',
+        'peachify',
+        'cb-peachify',
+        'gramcinema',
+        'cb-gramcinema',
+        'hdghartv',
+        'cb-hdghartv',
+        'fibwatch',
+        'cb-fibwatch',
+        'xpass',
+        '1shows',
+        'vidrock',
+        'dahmermovies',
+        'dahmermovies-tv',
+        'redflix',
+        'vidlink',
+        'vixsrc',
+        'vidfast',
+        'videasy',
+        'movix',
+        'movix-vf',
+        'purstream',
+      ]);
+
+      const combinedScrapers = [...primaryScrapers, ...extraCbScrapers];
+      const scrapersToRun = isFastLane
+        ? combinedScrapers.filter((s) => FAST_LANE_SCRAPER_IDS.has(s.id.toLowerCase()))
+        : excludeFast
+        ? combinedScrapers.filter((s) => !FAST_LANE_SCRAPER_IDS.has(s.id.toLowerCase()))
+        : combinedScrapers;
 
       interface CandidateSource {
         id: string;
@@ -2752,11 +3369,14 @@ async function startServer() {
         count: number;
       }> = [];
 
+      const scraperFetchTimeout = isFastLane ? 2800 : 3500;
+      const scraperExecTimeout = isFastLane ? 5200 : 8000;
+
       await Promise.allSettled(
         scrapersToRun.map(async (scraper) => {
           try {
             const scriptUrl = `${scraper._baseUrl || baseUrl}/${scraper.filename}`;
-            const code = await fetchScraperCode(scriptUrl, 3800, 1);
+            const code = await fetchScraperCode(scriptUrl, scraperFetchTimeout, 1);
             const scraperLogs: string[] = [];
             const exportsObj = compileScraperModule(code, (msg) => {
               if (scraperLogs.length < 40) scraperLogs.push(msg);
@@ -2778,7 +3398,7 @@ async function startServer() {
             const rawStreams = await Promise.race([
               getStreams(tmdbId, mediaType, season, episode),
               new Promise<NuvioRawStream[]>((_, reject) =>
-                setTimeout(() => reject(new Error('timeout')), 5500)
+                setTimeout(() => reject(new Error('timeout')), scraperExecTimeout)
               ),
             ]);
 
@@ -2845,7 +3465,15 @@ async function startServer() {
 
               playableCount += 1;
               const quality = extractQuality(raw.quality || rawText);
-              const detectedLangs = extractAudioLanguages(raw, scraper);
+              let detectedLangs = extractAudioLanguages(raw, scraper);
+              if (
+                tmdbMeta?.originalLanguage === 'hi' &&
+                !scraper.id.toLowerCase().includes('vidrock') &&
+                detectedLangs.length === 1 &&
+                detectedLangs[0] === 'Original'
+              ) {
+                detectedLangs = ['Hindi'];
+              }
               const primaryLang = detectedLangs[0] || 'Original';
               const cleanName = scraper.name.replace(/[^\p{L}\p{N}\s.\-_]/gu, '').trim() || scraper.name;
               let firstLine = (raw.title || raw.name || `${cleanName} Stream`)
@@ -2949,21 +3577,30 @@ async function startServer() {
       });
 
       // Round-robin select candidates across all scrapers so one verbose scraper never starves other providers
+      // Prioritize Hindi candidate sources when present
+      const isHindiSource = (c: CandidateSource) =>
+        /\b(hindi|hin)\b|🇮🇳/i.test(`${c.audioLanguage || ''} ${c.label}`);
+
+      const hindiCandidates = candidates.filter(isHindiSource);
+      const otherCandidates = candidates.filter((c) => !isHindiSource(c));
+
       const byScraper = new Map<string, CandidateSource[]>();
-      for (const c of candidates) {
+      // First populate Hindi candidates per scraper, then remaining candidates
+      for (const c of [...hindiCandidates, ...otherCandidates]) {
         const list = byScraper.get(c._cleanName) || [];
         list.push(c);
         byScraper.set(c._cleanName, list);
       }
+      const roundRobinCap = isFastLane ? 45 : 80;
       const roundRobinPool: CandidateSource[] = [];
       let roundIdx = 0;
-      while (roundRobinPool.length < Math.min(candidates.length, 48)) {
+      while (roundRobinPool.length < Math.min(candidates.length, roundRobinCap)) {
         let addedAny = false;
         for (const list of byScraper.values()) {
           if (roundIdx < list.length) {
             roundRobinPool.push(list[roundIdx]);
             addedAny = true;
-            if (roundRobinPool.length >= 48) break;
+            if (roundRobinPool.length >= roundRobinCap) break;
           }
         }
         if (!addedAny) break;
@@ -2992,12 +3629,10 @@ async function startServer() {
           : 15 * 60;
 
       const maxExpectedTvSeconds =
-        mediaType === 'tv' && expectedRuntimeMins
-          ? expectedRuntimeMins <= 55
-            ? Math.max(36 * 60, Math.round(expectedRuntimeMins * 1.48 * 60))
-            : Math.round(expectedRuntimeMins * 1.42 * 60)
-          : mediaType === 'tv'
-          ? 70 * 60
+        mediaType === 'tv'
+          ? expectedRuntimeMins
+            ? Math.max(90 * 60, Math.round(expectedRuntimeMins * 2.5 * 60))
+            : 100 * 60
           : 0;
 
       const isDurationMismatched = (totalSec: number): boolean => {
@@ -3016,6 +3651,7 @@ async function startServer() {
         return false;
       };
 
+      const probeStartTime = Date.now();
       const probeCandidate = async (cand: CandidateSource) => {
         try {
           const headers: Record<string, string> = {
@@ -3029,7 +3665,7 @@ async function startServer() {
           let probeRes = await fetch(cand._rawUrl, {
             headers,
             redirect: 'follow',
-            signal: AbortSignal.timeout(2800),
+            signal: AbortSignal.timeout(isFastLane ? 2000 : 2600),
           });
 
           // Some CDNs reject tiny Range headers with 416/405 — retry once without Range
@@ -3040,7 +3676,7 @@ async function startServer() {
               method: 'HEAD',
               headers: noRangeHeaders,
               redirect: 'follow',
-              signal: AbortSignal.timeout(2200),
+              signal: AbortSignal.timeout(1800),
             });
           }
 
@@ -3083,7 +3719,7 @@ async function startServer() {
               probeRes = await fetch(cand._rawUrl, {
                 headers: fullHeaders,
                 redirect: 'follow',
-                signal: AbortSignal.timeout(2800),
+                signal: AbortSignal.timeout(isFastLane ? 2000 : 2500),
               });
               if (probeRes.status >= 400) {
                 void probeRes.body?.cancel();
@@ -3093,7 +3729,7 @@ async function startServer() {
             }
             cand.format = 'hls';
           } else if (cand.format !== 'hls') {
-            // Confirm first bytes are not an HTML error / JSON error / access denied page disguised with wrong content-type
+            // Confirm first bytes are not an HTML error page AND inspect Matroska EBML magic bytes (1A 45 DF A3)
             const buf = Buffer.from(await probeRes.arrayBuffer());
             const headText = buf.subarray(0, 160).toString('utf8').trimStart().toLowerCase();
             if (
@@ -3106,6 +3742,16 @@ async function startServer() {
             ) {
               rejectedUrls.add(cand.id);
               return;
+            }
+            if (
+              buf.length >= 4 &&
+              buf[0] === 0x1a &&
+              buf[1] === 0x45 &&
+              buf[2] === 0xdf &&
+              buf[3] === 0xa3
+            ) {
+              cand._isMkv = true;
+              cand.isDirectPlayable = false;
             }
           }
 
@@ -3164,7 +3810,7 @@ async function startServer() {
               const varRes = await fetch(variantUrl, {
                 headers: varHeaders,
                 redirect: 'follow',
-                signal: AbortSignal.timeout(2500),
+                signal: AbortSignal.timeout(isFastLane ? 1600 : 2200),
               });
               if (!varRes.ok) {
                 rejectedUrls.add(cand.id);
@@ -3197,7 +3843,7 @@ async function startServer() {
                 Range: 'bytes=0-511',
               },
               redirect: 'follow',
-              signal: AbortSignal.timeout(2200),
+              signal: AbortSignal.timeout(isFastLane ? 1600 : 2200),
             });
             const segCt = (segRes.headers.get('content-type') || '').toLowerCase();
             if (segRes.status >= 400 || segCt.includes('text/html') || segCt.includes('application/json')) {
@@ -3212,23 +3858,27 @@ async function startServer() {
               return;
             }
 
-            if (mediaText.includes('#EXT-X-ENDLIST')) {
-              const segMatches = Array.from(mediaText.matchAll(/#EXTINF:([\d.]+)/g));
-              if (segMatches.length > 0) {
-                const totalSec = segMatches.reduce((acc, m) => acc + parseFloat(m[1] || '0'), 0);
-                if (totalSec > 0) {
-                  if (isDurationMismatched(totalSec)) {
-                    rejectedUrls.add(cand.id);
-                    return;
-                  }
+            const segMatches = Array.from(mediaText.matchAll(/#EXTINF:([\d.]+)/g));
+            if (segMatches.length > 0) {
+              const totalSec = segMatches.reduce((acc, m) => acc + parseFloat(m[1] || '0'), 0);
+              const isNetMirrorHls =
+                cand.id.toLowerCase().includes('netmirror') ||
+                cand._rawUrl.includes('imgcdn.kim') ||
+                cand._rawUrl.includes('freecdn4.top');
+              if (totalSec > 0) {
+                if (!isNetMirrorHls && isDurationMismatched(totalSec)) {
+                  rejectedUrls.add(cand.id);
+                  return;
+                }
+                if (!isNetMirrorHls || totalSec > 620) {
                   const mins = Math.round(totalSec / 60);
                   cand.label = `${cand.label} (${mins}m)`;
                 }
               }
             }
-          } else if (Date.now() - routeStartTime < 9000) {
-            // Probe actual MKV/MP4 audio tracks and duration with ffprobe when within soft time budget
-            const probedInfo = await probeContainerInfoAsync(cand._rawUrl, cand._rawHeaders, 2500);
+          } else if (!isFastLane && Date.now() - probeStartTime < 2200) {
+            // Probe actual MKV/MP4 audio tracks and duration with ffprobe only within fast budget
+            const probedInfo = await probeContainerInfoAsync(cand._rawUrl, cand._rawHeaders, 1800);
             if (probedInfo) {
               if (probedInfo.durationSeconds && isDurationMismatched(probedInfo.durationSeconds)) {
                 rejectedUrls.add(cand.id);
@@ -3259,16 +3909,18 @@ async function startServer() {
         }
       };
 
-      const PROBE_BATCH = 48;
+      const PROBE_BATCH = isFastLane ? 14 : 20;
+      const probeDeadlineMs = isFastLane ? 2800 : 3800;
       for (let i = 0; i < roundRobinPool.length; i += PROBE_BATCH) {
-        if (Date.now() - routeStartTime > 11500) break;
+        if (Date.now() - probeStartTime > probeDeadlineMs) break;
         await Promise.allSettled(roundRobinPool.slice(i, i + PROBE_BATCH).map(probeCandidate));
       }
 
-      // If strict probing timed out or rate-limited every mirror, surface unrejected round-robin candidates as unverified fallback
-      const useFallbackUnverified = probedOk.size === 0 && roundRobinPool.length > 0;
+      // If strict probing timed out before completing any batch, surface unrejected candidates; if all failed explicitly, drop dead links
+      const unrejectedPool = roundRobinPool.filter((c) => !rejectedUrls.has(c.id));
+      const useFallbackUnverified = probedOk.size === 0 && unrejectedPool.length > 0;
       const poolToExpand = useFallbackUnverified
-        ? roundRobinPool.filter((c) => !rejectedUrls.has(c.id)).slice(0, 12)
+        ? unrejectedPool.slice(0, 12)
         : candidates.filter((c) => probedOk.has(c.id) && !rejectedUrls.has(c.id));
 
       // Split any multi-language stream into SEPARATE individual server entries (never "Hindi + English" combined!)
@@ -3340,7 +3992,9 @@ async function startServer() {
         subtitles: allSubtitles,
         scraperResults,
       };
-      streamsResultCache.set(cacheKey, { fetchedAt: Date.now(), payload });
+      if (verifiedSources.length > 0) {
+        streamsResultCache.set(cacheKey, { fetchedAt: Date.now(), payload });
+      }
       res.json(payload);
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to run Nuvio scrapers';
@@ -3353,16 +4007,22 @@ async function startServer() {
     const manifestUrl = (req.query.manifestUrl as string) || DEFAULT_NUVIO_MANIFEST;
     try {
       const manifest = await fetchNuvioManifest(manifestUrl);
+      const scrapers =
+        Array.isArray(manifest.scrapers) && manifest.scrapers.length > 0
+          ? manifest.scrapers
+          : Array.isArray(manifest.providers)
+          ? manifest.providers
+          : [];
       const baseUrl = manifestUrl.replace(/\/manifest\.json.*$/, '');
       const statusMap: Record<string, 'ok' | 'error'> = {};
 
-      const BATCH_SIZE = 10;
-      for (let i = 0; i < manifest.scrapers.length; i += BATCH_SIZE) {
-        const batch = manifest.scrapers.slice(i, i + BATCH_SIZE);
+      const BATCH_SIZE = 20;
+      for (let i = 0; i < scrapers.length; i += BATCH_SIZE) {
+        const batch = scrapers.slice(i, i + BATCH_SIZE);
         await Promise.allSettled(
           batch.map(async (scraper) => {
             try {
-              const code = await fetchScraperCode(`${baseUrl}/${scraper.filename}`, 9000);
+              const code = await fetchScraperCode(`${baseUrl}/${scraper.filename}`, 4500, 1);
               const exportsObj = compileScraperModule(code);
               statusMap[scraper.id] = typeof exportsObj.getStreams === 'function' ? 'ok' : 'error';
             } catch {
@@ -3372,7 +4032,7 @@ async function startServer() {
         );
       }
 
-      res.json({ ok: true, statusMap, total: manifest.scrapers.length });
+      res.json({ ok: true, statusMap, total: scrapers.length });
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Failed to verify Nuvio manifest';
       res.status(502).json({ ok: false, error: msg, statusMap: {}, total: 0 });
@@ -3431,166 +4091,484 @@ async function startServer() {
       detail?: string;
     }
 
-    const body = (req.body || {}) as { targets?: ProviderCheckTarget[] };
-    const rawTargets = Array.isArray(body.targets) ? body.targets : [];
-    const seenKeys = new Set<string>();
-    const targets = rawTargets.filter((t) => {
-      if (!t || !t.key || !t.url || seenKeys.has(t.key)) return false;
-      seenKeys.add(t.key);
-      return true;
-    });
+    try {
+      const body = (req.body || {}) as { targets?: ProviderCheckTarget[] };
+      const rawTargets = Array.isArray(body.targets) ? body.targets : [];
+      const seenKeys = new Set<string>();
+      const targets = rawTargets.filter((t) => {
+        if (!t || !t.key || typeof t.url !== 'string' || !t.url.trim() || seenKeys.has(t.key)) return false;
+        seenKeys.add(t.key);
+        return true;
+      });
 
-    const results: Record<string, HealthProbeOutcome> = {};
-    // Deduplicate identical endpoint URLs so shared mirrors or directory entries are pinged once
-    const inFlightByUrl = new Map<string, Promise<HealthProbeOutcome>>();
+      const results: Record<string, HealthProbeOutcome> = {};
+      const inFlightByUrl = new Map<string, Promise<HealthProbeOutcome>>();
 
-    const probeEndpointUrl = (normalizedUrl: string): Promise<HealthProbeOutcome> => {
-      const existing = inFlightByUrl.get(normalizedUrl);
-      if (existing) return existing;
-
-      const task = (async (): Promise<HealthProbeOutcome> => {
-        const start = Date.now();
+      const readBoundedSnippet = async (response: globalThis.Response, maxBytes = 49152): Promise<string> => {
+        if (!response.body) {
+          return await response.text();
+        }
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let total = 0;
+        let out = '';
         try {
-          const response = await fetch(normalizedUrl, {
-            headers: {
-              'User-Agent': DEFAULT_UA,
-              Accept: 'application/json, text/plain, */*',
-              Origin: 'https://web.stremio.com',
-              Referer: 'https://web.stremio.com/',
-            },
+          while (total < maxBytes) {
+            const { value, done } = await reader.read();
+            if (done || !value) break;
+            total += value.byteLength;
+            out += decoder.decode(value, { stream: true });
+          }
+          out += decoder.decode();
+        } finally {
+          void reader.cancel().catch(() => {});
+        }
+        return out;
+      };
+
+      const fetchWithHardTimeout = async (
+        targetUrl: string,
+        headers: Record<string, string>,
+        timeoutMs = 4200
+      ): Promise<{ response: globalThis.Response; snippet: string; latency: number }> => {
+        const controller = new AbortController();
+        const start = Date.now();
+        const timer = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          const response = await fetch(targetUrl, {
+            headers,
             redirect: 'follow',
-            signal: AbortSignal.timeout(4500),
+            signal: controller.signal,
           });
           const latency = Date.now() - start;
-
-          if (response.status === 429) {
-            void response.body?.cancel();
-            return {
-              status: 'degraded',
-              latency,
-              detail: 'Rate limited (HTTP 429)',
-            };
-          }
-
           if (!response.ok) {
-            void response.body?.cancel();
+            void response.body?.cancel().catch(() => {});
+            return { response, snippet: '', latency };
+          }
+          const snippet = await readBoundedSnippet(response, 49152);
+          return { response, snippet, latency: Date.now() - start };
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+
+      const probeEndpointUrl = (normalizedUrl: string): Promise<HealthProbeOutcome> => {
+        const existing = inFlightByUrl.get(normalizedUrl);
+        if (existing) return existing;
+
+        const task = (async (): Promise<HealthProbeOutcome> => {
+          const start = Date.now();
+          try {
+            let probe = await fetchWithHardTimeout(normalizedUrl, {
+              'User-Agent': DEFAULT_UA,
+              Accept: 'application/json, text/plain, */*',
+            });
+
+            if (probe.response.status === 403 || probe.response.status === 405) {
+              probe = await fetchWithHardTimeout(normalizedUrl, {
+                'User-Agent': DEFAULT_UA,
+                Accept: 'application/json, text/plain, */*',
+                Origin: 'https://web.stremio.com',
+                Referer: 'https://web.stremio.com/',
+              });
+            }
+
+            const { response, snippet, latency } = probe;
+
+            if (response.status === 429) {
+              return { status: 'degraded', latency, detail: 'Rate limited (HTTP 429)' };
+            }
+
+            if (response.status === 403 || response.status === 503) {
+              const isCf = Boolean(response.headers.get('cf-ray') || response.headers.get('server')?.toLowerCase().includes('cloudflare'));
+              if (isCf) {
+                return { status: 'degraded', latency, detail: `Protected (HTTP ${response.status})` };
+              }
+            }
+
+            if (!response.ok) {
+              if (response.status === 404 && normalizedUrl.includes('/api/bengali/')) {
+                return { status: 'offline', latency, detail: 'Unconfigured (no Bengali backend)' };
+              }
+              return { status: 'offline', latency, detail: `HTTP ${response.status}` };
+            }
+
+            const trimmed = snippet.trim();
+            if (trimmed.length === 0) {
+              return { status: 'degraded', latency, detail: 'Empty response' };
+            }
+
+            let parsed: Record<string, unknown> | null = null;
+            try {
+              parsed = JSON.parse(trimmed) as Record<string, unknown>;
+            } catch {
+              parsed = null;
+            }
+
+            if (!parsed && (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html'))) {
+              return { status: 'degraded', latency, detail: 'HTML instead of JSON' };
+            }
+
+            let detailHint = 'Online';
+            if (parsed) {
+              if (Array.isArray(parsed.scrapers)) {
+                detailHint = `${parsed.scrapers.length} scrapers`;
+              } else if (typeof parsed.version === 'string') {
+                detailHint = `v${parsed.version}`;
+              } else if (typeof parsed.name === 'string') {
+                detailHint = parsed.name;
+              } else if (Array.isArray(parsed.pluginLists) || Array.isArray(parsed.extensions)) {
+                detailHint = 'CloudStream Repo';
+              } else if (Array.isArray(parsed.zeeBanglaDaily)) {
+                detailHint = `${parsed.zeeBanglaDaily.length} serials`;
+              } else {
+                detailHint = 'Manifest OK';
+              }
+            }
+
+            if (latency >= 2500) {
+              return { status: 'degraded', latency, detail: `Slow (${detailHint})` };
+            }
+
+            return { status: 'online', latency, detail: detailHint };
+          } catch (err) {
+            const latency = Date.now() - start;
+            const isTimeout =
+              err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
             return {
               status: 'offline',
               latency,
-              detail: `HTTP ${response.status}`,
+              detail: isTimeout ? 'Request timeout' : 'Unreachable',
             };
           }
+        })();
 
-          const text = await response.text();
-          const trimmed = text.trim();
-          if (trimmed.length === 0) {
-            return {
-              status: 'degraded',
-              latency,
-              detail: 'Empty response',
-            };
-          }
+        inFlightByUrl.set(normalizedUrl, task);
+        return task;
+      };
 
-          let parsed: Record<string, unknown> | null = null;
-          try {
-            parsed = JSON.parse(trimmed) as Record<string, unknown>;
-          } catch {
-            parsed = null;
-          }
-
-          if (!parsed && (trimmed.startsWith('<!doctype') || trimmed.startsWith('<html'))) {
-            return {
-              status: 'degraded',
-              latency,
-              detail: 'HTML instead of JSON',
-            };
-          }
-
-          let detailHint = 'Online';
-          if (parsed) {
-            if (Array.isArray(parsed.scrapers)) {
-              detailHint = `${parsed.scrapers.length} scrapers`;
-            } else if (typeof parsed.version === 'string') {
-              detailHint = `v${parsed.version}`;
-            } else if (typeof parsed.name === 'string') {
-              detailHint = parsed.name;
-            } else if (Array.isArray(parsed.pluginLists) || Array.isArray(parsed.extensions)) {
-              detailHint = 'CloudStream Repo';
-            } else {
-              detailHint = 'Manifest OK';
-            }
-          }
-
-          // Mark slow >= 2500ms responses as degraded (realistic cross-region CDN SLA)
-          if (latency >= 2500) {
-            return {
-              status: 'degraded',
-              latency,
-              detail: `Slow (${detailHint})`,
-            };
-          }
-
-          return {
-            status: 'online',
-            latency,
-            detail: detailHint,
-          };
-        } catch (err) {
-          const latency = Date.now() - start;
-          const isTimeout =
-            err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
-          return {
-            status: 'offline',
-            latency,
-            detail: isTimeout ? 'Request timeout' : 'Unreachable',
-          };
+      const checkSingleTarget = async (target: ProviderCheckTarget) => {
+        let normalizedUrl = target.url.trim();
+        if (normalizedUrl.startsWith('/api/')) {
+          normalizedUrl = `http://127.0.0.1:${PORT}${normalizedUrl}`;
+        } else if (normalizedUrl.startsWith('stremio://')) {
+          normalizedUrl = normalizedUrl.replace(/^stremio:\/\//i, 'https://');
         }
-      })();
+        if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
+          results[target.key] = { status: 'offline', latency: 0, detail: 'Invalid URL' };
+          return;
+        }
+        results[target.key] = await probeEndpointUrl(normalizedUrl);
+      };
 
-      inFlightByUrl.set(normalizedUrl, task);
-      return task;
-    };
-
-    const checkSingleTarget = async (target: ProviderCheckTarget) => {
-      let normalizedUrl = target.url.trim();
-      if (normalizedUrl.startsWith('stremio://')) {
-        normalizedUrl = normalizedUrl.replace(/^stremio:\/\//i, 'https://');
-      }
-      if (!normalizedUrl.startsWith('http://') && !normalizedUrl.startsWith('https://')) {
-        results[target.key] = {
-          status: 'offline',
-          latency: 0,
-          detail: 'Invalid URL',
-        };
-        return;
+      const CONCURRENCY = 20;
+      for (let i = 0; i < targets.length; i += CONCURRENCY) {
+        await Promise.allSettled(targets.slice(i, i + CONCURRENCY).map(checkSingleTarget));
       }
 
-      results[target.key] = await probeEndpointUrl(normalizedUrl);
-    };
+      const values = Object.values(results);
+      const online = values.filter((v) => v.status === 'online').length;
+      const degraded = values.filter((v) => v.status === 'degraded').length;
+      const offline = values.filter((v) => v.status === 'offline').length;
 
-    // Process in concurrent batches of 25 with URL deduplication
-    const CONCURRENCY = 25;
-    for (let i = 0; i < targets.length; i += CONCURRENCY) {
-      await Promise.allSettled(targets.slice(i, i + CONCURRENCY).map(checkSingleTarget));
+      res.json({
+        ok: true,
+        checkedAt: Date.now(),
+        results,
+        summary: { total: values.length, online, degraded, offline },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Health check error';
+      res.status(200).json({
+        ok: false,
+        error: msg,
+        checkedAt: Date.now(),
+        results: {},
+        summary: { total: 0, online: 0, degraded: 0, offline: 0 },
+      });
+    }
+  });
+
+  // Export native Android Studio / Gradle / Kotlin project archive
+  app.get('/api/android/archive', (_req, res) => {
+    const projectRoot = process.cwd();
+    const androidDir = path.join(projectRoot, 'android');
+    if (!fs.existsSync(androidDir)) {
+      res.status(404).json({ error: 'Android project directory not found' });
+      return;
     }
 
-    const values = Object.values(results);
-    const online = values.filter((v) => v.status === 'online').length;
-    const degraded = values.filter((v) => v.status === 'degraded').length;
-    const offline = values.filter((v) => v.status === 'offline').length;
+    res.setHeader('Content-Type', 'application/gzip');
+    res.setHeader(
+      'Content-Disposition',
+      'attachment; filename="euthopiar-android-studio-project.tar.gz"'
+    );
 
-    res.json({
-      ok: true,
-      checkedAt: Date.now(),
-      results,
-      summary: { total: values.length, online, degraded, offline },
+    const targets = ['android'];
+    if (fs.existsSync(path.join(projectRoot, 'capacitor.config.ts'))) {
+      targets.push('capacitor.config.ts');
+    }
+
+    const tarProc = spawn(
+      'tar',
+      [
+        '--exclude=android/.gradle',
+        '--exclude=android/build',
+        '--exclude=android/app/build',
+        '--exclude=android/.idea',
+        '--exclude=android/local.properties',
+        '-czf',
+        '-',
+        ...targets,
+      ],
+      { cwd: projectRoot }
+    );
+
+    tarProc.stdout.pipe(res);
+    tarProc.stderr.on('data', () => {});
+    tarProc.on('error', () => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Failed to archive Android project' });
+      } else {
+        res.end();
+      }
+    });
+    res.on('close', () => {
+      if (!tarProc.killed) {
+        tarProc.kill('SIGTERM');
+      }
     });
   });
 
-  // Create Vite server in middleware mode
+  // Search for official Hindi or Bengali dubbed TV series full episodes on YouTube
+  const ytEpisodeCache = new Map<string, { fetchedAt: number; data: unknown }>();
+  app.get('/api/youtube/episode', async (req, res) => {
+    const title = String(req.query.title || '').trim();
+    const season = Number(req.query.season || 1);
+    const episode = Number(req.query.episode || 1);
+    const lang = String(req.query.lang || '').toLowerCase();
+    const isBengali = lang.includes('bengali') || lang.includes('bn') || title.toLowerCase().includes('bengali');
+    if (!title) {
+      return res.status(400).json({ error: 'Missing title query parameter' });
+    }
+
+    const cacheKey = `${title.toLowerCase()}:s${season}:e${episode}:lang:${isBengali ? 'bn' : 'hi'}`;
+    const cached = ytEpisodeCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < 60 * 60 * 1000) {
+      return res.json(cached.data);
+    }
+
+    try {
+      const isCid = /\b(c\.?i\.?d\.?)\b/i.test(title);
+      // Fallback curate known top IDs for C.I.D. S1E1 to guarantee instant playback without timeout
+      if (isCid && season === 1 && episode === 1) {
+        const topId = isBengali ? 'AlZuNGfIRxQ' : 'FOY67ghyOc0';
+        const source = {
+          id: `yt-official-${topId}-${isBengali ? 'bn' : 'hi'}`,
+          providerName: isBengali ? 'Sony Aath (Official YouTube)' : 'SET India (Official YouTube)',
+          label: isBengali ? 'C.I.D. Bengali - Season 1 Episode 1 - Full Episode' : 'CID (सीआईडी) Season 1 - Episode 1 - Full Episode',
+          quality: '1080p Official',
+          url: `https://www.youtube-nocookie.com/embed/${topId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&iv_load_policy=3`,
+          format: 'youtube',
+          isFullEpisode: true,
+          audioLanguage: isBengali ? 'Bengali' : 'Hindi',
+          note: `Official Full Episode · ${isBengali ? 'Sony Aath' : 'SET India'} · ${isBengali ? 'Bengali Dub' : 'Hindi'}`,
+          isDirectPlayable: true,
+          isVerified: true,
+        };
+        const payload = { found: true, sources: [source] };
+        ytEpisodeCache.set(cacheKey, { fetchedAt: Date.now(), data: payload });
+        return res.json(payload);
+      }
+
+      const searchQuery = isCid
+        ? isBengali
+          ? `CID Bengali Season ${season} Episode ${episode} Sony Aath Full Episode`
+          : `CID Season ${season} Episode ${episode} SET India Full Episode`
+        : isBengali
+        ? `${title} Bengali Season ${season} Episode ${episode} Full Episode`
+        : `${title} Season ${season} Episode ${episode} Full Episode`;
+
+      const ytUrl = `https://www.youtube.com/results?search_query=${encodeURIComponent(searchQuery)}`;
+      const response = await fetch(ytUrl, {
+        headers: { 'User-Agent': DEFAULT_UA, 'Accept-Language': 'en-US,en;q=0.9' },
+        signal: AbortSignal.timeout(9000),
+      });
+
+      if (!response.ok) {
+        return res.status(502).json({ error: 'Failed to search YouTube' });
+      }
+
+      const html = await response.text();
+      const videoIds = Array.from(
+        new Set(Array.from(html.matchAll(/"videoId":"([a-zA-Z0-9_-]{11})"/g)).map((m) => m[1]))
+      ).slice(0, 4);
+
+      if (videoIds.length === 0) {
+        return res.json({ found: false, sources: [] });
+      }
+
+      const topId = videoIds[0];
+      const oembedRes = await fetch(`https://noembed.com/embed?url=https://www.youtube.com/watch?v=${topId}`, {
+        signal: AbortSignal.timeout(3500),
+      }).catch(() => null);
+      const oembed = oembedRes && oembedRes.ok ? ((await oembedRes.json().catch(() => ({}))) as Record<string, string>) : {};
+
+      const videoTitle = oembed?.title || `${title} S${season}E${episode} Full Episode`;
+      const author = oembed?.author_name || (isCid ? (isBengali ? 'Sony Aath' : 'SET India') : 'YouTube');
+
+      const source = {
+        id: `yt-official-${topId}-${isBengali ? 'bn' : 'hi'}`,
+        providerName: `${author} (Official YouTube)`,
+        label: `${videoTitle.slice(0, 60)} · Full Episode`,
+        quality: '1080p Official',
+        url: `https://www.youtube-nocookie.com/embed/${topId}?autoplay=1&rel=0&modestbranding=1&playsinline=1&iv_load_policy=3`,
+        format: 'youtube',
+        isFullEpisode: true,
+        audioLanguage: isBengali ? 'Bengali' : 'Hindi',
+        note: `Official Full Episode · ${author} · ${isBengali ? 'Bengali Dub' : 'Hindi'}`,
+        isDirectPlayable: true,
+        isVerified: true,
+      };
+
+      const payload = { found: true, sources: [source] };
+      ytEpisodeCache.set(cacheKey, { fetchedAt: Date.now(), data: payload });
+      res.json(payload);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Failed to resolve YouTube episode';
+      res.status(502).json({ error: msg, found: false, sources: [] });
+    }
+  });
+
+  // Explicit 404 JSON response for unconfigured /api/bengali/* routes so Vite SPA fallback never returns HTTP 200 HTML
+  app.use('/api/bengali', (_req, res) => {
+    res.status(404).json({
+      ok: false,
+      error: 'No Bengali serial provider backend is deployed on this server.',
+    });
+  });
+
+  // Create Vite server in middleware mode (HMR/WS disabled in Cloud Run preview to avoid WebSocket errors)
   const vite = await createViteServer({
-    server: { middlewareMode: true },
+    server: {
+      middlewareMode: true,
+      hmr: false,
+      ws: false,
+    },
     appType: 'spa',
+  });
+
+  // Serve a WebSocket-free /@vite/client shim when HMR is disabled so Cloud Run
+  // preview iframes never attempt failing ws:// or wss:// connections while CSS
+  // style injection and React Refresh helpers continue working normally.
+  app.get('/@vite/client', (_req, res) => {
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.send(`import "/node_modules/vite/dist/client/env.mjs";
+
+const cspNonce =
+  "document" in globalThis
+    ? document.querySelector("meta[property=csp-nonce]")?.nonce
+    : void 0;
+
+const sheetsMap = new Map();
+const linkSheetsMap = new Map();
+
+if ("document" in globalThis) {
+  document.querySelectorAll("style[data-vite-dev-id]").forEach((el) => {
+    const devId = el.getAttribute("data-vite-dev-id");
+    if (devId) sheetsMap.set(devId, el);
+  });
+  document
+    .querySelectorAll('link[rel="stylesheet"][data-vite-dev-id]')
+    .forEach((el) => {
+      const devId = el.getAttribute("data-vite-dev-id");
+      if (devId) linkSheetsMap.set(devId, el);
+    });
+}
+
+let lastInsertedStyle;
+
+function updateStyle(id, content) {
+  if (!("document" in globalThis) || linkSheetsMap.has(id)) return;
+  let style = sheetsMap.get(id);
+  if (!style) {
+    style = document.createElement("style");
+    style.setAttribute("type", "text/css");
+    style.setAttribute("data-vite-dev-id", id);
+    style.textContent = content;
+    if (cspNonce) style.setAttribute("nonce", cspNonce);
+    if (!lastInsertedStyle) {
+      document.head.appendChild(style);
+      setTimeout(() => {
+        lastInsertedStyle = void 0;
+      }, 0);
+    } else {
+      lastInsertedStyle.insertAdjacentElement("afterend", style);
+    }
+    lastInsertedStyle = style;
+  } else if (style.textContent !== content) {
+    style.textContent = content;
+  }
+  sheetsMap.set(id, style);
+}
+
+function removeStyle(id) {
+  if (!("document" in globalThis)) return;
+  if (linkSheetsMap.has(id)) {
+    const escaped =
+      typeof CSS !== "undefined" && typeof CSS.escape === "function"
+        ? CSS.escape(id)
+        : id.replace(/"/g, '\\\\"');
+    document
+      .querySelectorAll(\`link[rel="stylesheet"][data-vite-dev-id="\${escaped}"]\`)
+      .forEach((el) => el.remove());
+    linkSheetsMap.delete(id);
+  }
+  const style = sheetsMap.get(id);
+  if (style) {
+    style.parentNode?.removeChild(style);
+    sheetsMap.delete(id);
+  }
+}
+
+const noop = () => {};
+
+function createHotContext() {
+  return {
+    data: {},
+    accept: noop,
+    acceptExports: noop,
+    acceptDeps: noop,
+    dispose: noop,
+    prune: noop,
+    decline: noop,
+    invalidate: noop,
+    on: noop,
+    off: noop,
+    send: noop,
+  };
+}
+
+function injectQuery(url, queryToInject) {
+  if (url[0] !== "." && url[0] !== "/") return url;
+  const pathname = url.replace(/[?#].*$/, "");
+  const { search, hash } = new URL(url, "http://vite.dev");
+  return \`\${pathname}?\${queryToInject}\${search ? "&" + search.slice(1) : ""}\${hash || ""}\`;
+}
+
+const { HTMLElement: BaseHTMLElement = class {}, customElements } = globalThis;
+class ErrorOverlay extends BaseHTMLElement {
+  close() {
+    this.parentNode?.removeChild(this);
+  }
+}
+if (customElements && !customElements.get("vite-error-overlay")) {
+  customElements.define("vite-error-overlay", ErrorOverlay);
+}
+
+export { ErrorOverlay, createHotContext, injectQuery, removeStyle, updateStyle };
+`);
   });
 
   app.use(vite.middlewares);

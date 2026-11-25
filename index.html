@@ -3,15 +3,66 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <script>
+      (function () {
+        // Suppress harmless Vite HMR WebSocket errors in Cloud Run iframe environment (HMR is disabled by system policy)
+        var isHmrError = function (msg) {
+          if (!msg) return false;
+          var s = typeof msg === 'string' ? msg : (msg.message || msg.stack || String(msg));
+          return (
+            s.indexOf('WebSocket closed without opened') !== -1 ||
+            s.indexOf('SendBeforeConnectError') !== -1 ||
+            s.indexOf("reading 'send'") !== -1 ||
+            s.indexOf('/@vite/client') !== -1 ||
+            s.indexOf('@vite-plugin-pwa') !== -1
+          );
+        };
+        var origError = console.error;
+        console.error = function () {
+          for (var i = 0; i < arguments.length; i++) {
+            if (isHmrError(arguments[i])) return;
+          }
+          return origError.apply(console, arguments);
+        };
+        window.addEventListener(
+          'error',
+          function (e) {
+            if (isHmrError(e.message) || isHmrError(e.error)) {
+              e.preventDefault();
+              e.stopImmediatePropagation();
+              return true;
+            }
+          },
+          true
+        );
+        window.addEventListener(
+          'unhandledrejection',
+          function (e) {
+            if (isHmrError(e.reason)) {
+              e.preventDefault();
+              e.stopImmediatePropagation();
+            }
+          },
+          true
+        );
+      })();
+    </script>
+    <meta name="theme-color" content="#07090e" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="EUTHOPIAR" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
     <title>EUTHOPIAR — Cinema, Series &amp; Live TV Aggregator</title>
     <meta
       name="description"
-      content="Unified Movie, TV Series, and Live TV streaming aggregator with TMDB metadata, M3U playlist parsing, and adaptive HLS playback."
+      content="Unified Movie, TV Series, and Live TV streaming aggregator with TMDB metadata, Stremio add-ons, and adaptive HLS playback."
     />
     <meta property="og:title" content="EUTHOPIAR — Cinema, Series &amp; Live TV Aggregator" />
     <meta
       property="og:description"
-      content="Unified Movie, TV Series, and Live TV streaming aggregator with TMDB metadata, M3U playlist parsing, and adaptive HLS playback."
+      content="Unified Movie, TV Series, and Live TV streaming aggregator with TMDB metadata, Stremio add-ons, and adaptive HLS playback."
     />
     <meta property="og:type" content="website" />
     <meta name="twitter:card" content="summary_large_image" />
@@ -28,13 +79,6 @@
         tmdbImageBase: 'https://image.tmdb.org/t/p',
         defaultTmdbApiKey: '7ba2b8ccdcabf66f03d2c5ed45d4e2e6',
         defaultStreamEndpoints: [],
-        iptvOrg: {
-          masterIndexUrl: 'https://iptv-org.github.io/iptv/index.m3u',
-          indexCategoryUrl: 'https://iptv-org.github.io/iptv/index.category.m3u',
-          categoryBaseUrl: 'https://iptv-org.github.io/iptv/categories',
-          countryBaseUrl: 'https://iptv-org.github.io/iptv/countries',
-          apiBaseUrl: 'https://iptv-org.github.io/api'
-        },
         dejavuApi: {
           baseUrl: '',
           routes: {

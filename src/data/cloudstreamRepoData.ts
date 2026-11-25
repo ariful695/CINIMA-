@@ -363,6 +363,108 @@ export const CLOUDSTREAM_DIRECTORY_REPOS: RawCloudStreamRepo[] = [
       },
       {
         "name": "YTS"
+      },
+      {
+        "name": "AllMovieLandProvider"
+      },
+      {
+        "name": "Anikage"
+      },
+      {
+        "name": "AniKoto"
+      },
+      {
+        "name": "Anilight"
+      },
+      {
+        "name": "AnimeDekhoProvider"
+      },
+      {
+        "name": "Animedubhindi"
+      },
+      {
+        "name": "AniPm"
+      },
+      {
+        "name": "AniSnatch"
+      },
+      {
+        "name": "AniVortex"
+      },
+      {
+        "name": "Anizone"
+      },
+      {
+        "name": "Chikianimation"
+      },
+      {
+        "name": "Cinefreak"
+      },
+      {
+        "name": "Comix"
+      },
+      {
+        "name": "GoldenAudiobooks"
+      },
+      {
+        "name": "Gotaku"
+      },
+      {
+        "name": "Hdmovie2"
+      },
+      {
+        "name": "IdlixProvider"
+      },
+      {
+        "name": "Kartoons"
+      },
+      {
+        "name": "KisskhProvider"
+      },
+      {
+        "name": "LayarKacaProvider"
+      },
+      {
+        "name": "MassTamilanProvider"
+      },
+      {
+        "name": "Microtv"
+      },
+      {
+        "name": "MovieBoxProvider"
+      },
+      {
+        "name": "MovieNestBD"
+      },
+      {
+        "name": "MultiMoviesProvider"
+      },
+      {
+        "name": "ObejrzyjTo"
+      },
+      {
+        "name": "Piratexplay"
+      },
+      {
+        "name": "Pmsm"
+      },
+      {
+        "name": "Reanime"
+      },
+      {
+        "name": "UHDmoviesProvider"
+      },
+      {
+        "name": "WatchParty"
+      },
+      {
+        "name": "XonProvider"
+      },
+      {
+        "name": "ZDKSerials"
+      },
+      {
+        "name": "Zinkmovies"
       }
     ]
   },
@@ -1038,6 +1140,123 @@ export const CLOUDSTREAM_DIRECTORY_REPOS: RawCloudStreamRepo[] = [
       },
       {
         "name": "Xon"
+      },
+      {
+        "name": "AniKoto"
+      },
+      {
+        "name": "AnimeSuge"
+      },
+      {
+        "name": "BilibiliProvider"
+      },
+      {
+        "name": "CastleTvProvider"
+      },
+      {
+        "name": "CineDozeProvider"
+      },
+      {
+        "name": "CineTvProvider"
+      },
+      {
+        "name": "CineVoodProvider"
+      },
+      {
+        "name": "ClownIPTVProvider"
+      },
+      {
+        "name": "CNC Verse Mobile"
+      },
+      {
+        "name": "CricifyProvider"
+      },
+      {
+        "name": "DaddyLiveProvider"
+      },
+      {
+        "name": "DesiSerialsProvider"
+      },
+      {
+        "name": "DoFlixProvider"
+      },
+      {
+        "name": "EasyPlayProvider"
+      },
+      {
+        "name": "EinthusanProvider"
+      },
+      {
+        "name": "HDOProvider"
+      },
+      {
+        "name": "HDrezkaProvider"
+      },
+      {
+        "name": "JioTVPlusProvider"
+      },
+      {
+        "name": "LivXowProvider"
+      },
+      {
+        "name": "M3UPlaylistPlayerProvider"
+      },
+      {
+        "name": "MLSBDProvider"
+      },
+      {
+        "name": "MovieBoxProvider"
+      },
+      {
+        "name": "MovieLinkBDProvider"
+      },
+      {
+        "name": "MoviePlusProvider"
+      },
+      {
+        "name": "MoviezwapProvider"
+      },
+      {
+        "name": "NTVProvider"
+      },
+      {
+        "name": "PikashowProvider"
+      },
+      {
+        "name": "PlayFyProvider"
+      },
+      {
+        "name": "PlayZTVProvider"
+      },
+      {
+        "name": "PPVProvider"
+      },
+      {
+        "name": "RadioIndiaProvider"
+      },
+      {
+        "name": "SKTechProvider"
+      },
+      {
+        "name": "SportzxProvider"
+      },
+      {
+        "name": "StreamFlixProvider"
+      },
+      {
+        "name": "SubscriptionManager"
+      },
+      {
+        "name": "TamilDhoolProvider"
+      },
+      {
+        "name": "TamilUltraProvider"
+      },
+      {
+        "name": "VegaMoviesProvider"
+      },
+      {
+        "name": "XonProvider"
       }
     ]
   },
@@ -1413,6 +1632,9 @@ export const CLOUDSTREAM_DIRECTORY_REPOS: RawCloudStreamRepo[] = [
       },
       {
         "name": "Prime Video"
+      },
+      {
+        "name": "Netmirror"
       }
     ]
   },
@@ -1482,6 +1704,9 @@ export const CLOUDSTREAM_DIRECTORY_REPOS: RawCloudStreamRepo[] = [
       },
       {
         "name": "WatchMoviesPk"
+      },
+      {
+        "name": "BanglaPlex"
       }
     ]
   },

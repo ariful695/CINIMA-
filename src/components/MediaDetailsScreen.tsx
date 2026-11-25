@@ -360,6 +360,7 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
       genreIds: details.genreIds?.length ? details.genreIds : details.genres.map((g) => g.id),
       originalLanguage: details.originalLanguage,
       releaseYear: details.releaseDate ? parseInt(details.releaseDate.slice(0, 4), 10) || undefined : undefined,
+      runtimeMinutes: details.runtime || undefined,
       initialTime:
         existingProgress && existingProgress.mediaType === 'movie'
           ? existingProgress.currentTime
@@ -392,6 +393,7 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
       genreIds: details.genreIds?.length ? details.genreIds : details.genres.map((g) => g.id),
       originalLanguage: details.originalLanguage,
       releaseYear: details.releaseDate ? parseInt(details.releaseDate.slice(0, 4), 10) || undefined : undefined,
+      runtimeMinutes: episode.runtime || details.runtime || undefined,
       seasonNumber: episode.seasonNumber,
       episodeNumber: episode.episodeNumber,
       episodeTitle: episode.name,
@@ -423,6 +425,7 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
           genreIds: details.genreIds?.length ? details.genreIds : details.genres.map((g) => g.id),
           originalLanguage: details.originalLanguage,
           releaseYear: details.releaseDate ? parseInt(details.releaseDate.slice(0, 4), 10) || undefined : undefined,
+          runtimeMinutes: details.runtime || undefined,
           seasonNumber: selectedSeason,
           episodeNumber: 1,
           bengaliSerialSlug: details.bengaliSerialSlug || seedItem?.bengaliSerialSlug,
@@ -456,8 +459,25 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
     }
   };
 
+  const isBengaliTitle = useMemo(() => {
+    const lang = details?.originalLanguage || seedItem?.originalLanguage;
+    const slug = details?.bengaliSerialSlug || seedItem?.bengaliSerialSlug;
+    const title = details?.title || seedItem?.title;
+    return (
+      bengaliSerialService.isBengaliSerialOrCartoon({
+        title,
+        originalLanguage: lang,
+        bengaliSerialSlug: slug,
+      }) || (mediaId >= 895000 && mediaId <= 899999)
+    );
+  }, [details, seedItem, mediaId]);
+
   const handleWatchTrailer = async () => {
     if (!details || resolvingAction) return;
+    if (isBengaliTitle) {
+      setActionFeedback('YouTube trailer playback is disabled for Bengali serials');
+      return;
+    }
     setResolvingAction('trailer');
     try {
       const videos = await tmdbService.getMediaVideos(details.id, details.mediaType);
@@ -558,6 +578,35 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
     ? 'Series'
     : 'Feature Film';
 
+  const [extraLogoCandidates, setExtraLogoCandidates] = useState<string[]>([]);
+
+  useEffect(() => {
+    let active = true;
+    setExtraLogoCandidates([]);
+    setLogoCandidateIdx(0);
+    setLogoLoadedUrl(null);
+    setLogoLoadError(false);
+
+    void tmdbService
+      .getMediaLogoCandidates(
+        mediaId,
+        mediaType,
+        details?.imdbId || seedItem?.imdbId,
+        details?.logoPath,
+        details?.logoPaths
+      )
+      .then((urls) => {
+        if (active && urls.length > 0) {
+          setExtraLogoCandidates(urls);
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      active = false;
+    };
+  }, [mediaId, mediaType, details?.imdbId, seedItem?.imdbId, details?.logoPath, details?.logoPaths]);
+
   const logoCandidateUrls = useMemo(() => {
     const paths =
       details?.logoPaths && details.logoPaths.length > 0
@@ -577,8 +626,18 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
         urls.push(preferredUrl);
       }
     }
+    for (const u of extraLogoCandidates) {
+      if (u && !urls.includes(u)) {
+        urls.push(u);
+      }
+    }
+    const knownImdb = details?.imdbId || seedItem?.imdbId;
+    if (knownImdb) {
+      const metahub = `https://images.metahub.space/logo/medium/${knownImdb}/img`;
+      if (!urls.includes(metahub)) urls.push(metahub);
+    }
     return urls;
-  }, [details?.logoPath, details?.logoPaths]);
+  }, [details?.logoPath, details?.logoPaths, details?.imdbId, seedItem?.imdbId, extraLogoCandidates]);
 
   const logoUrl =
     !logoLoadError && logoCandidateIdx < logoCandidateUrls.length
@@ -627,42 +686,43 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
 
   return (
     <div className="fixed inset-0 z-40 bg-[#07090E] overflow-y-auto">
-      {/* 2-Second Logo Splash Overlay */}
-      {splashActive && (
-        <div
-          onClick={() => setSplashActive(false)}
-          className="fixed inset-0 z-50 bg-[#05070B] flex flex-col items-center justify-center p-6 cursor-pointer select-none"
-        >
-          {/* Backdrop image */}
-          <div className="absolute inset-0 overflow-hidden opacity-50">
-            <MediaPosterImage
-              path={details?.backdropPath || seedItem?.backdropPath || details?.posterPath || seedItem?.posterPath}
-              fallbackSrc={details?.fallbackBackdrop || seedItem?.fallbackBackdrop}
-              size="w1280"
-              alt=""
-              className="h-full w-full object-cover scale-105 blur-sm"
-            />
-            <div className="absolute inset-0 bg-gradient-to-t from-[#05070B] via-[#05070B]/75 to-[#05070B]/50" />
-          </div>
-
-          {/* Centered Logo (Only Logo, No Name) */}
-          <div className="relative z-10 flex flex-col items-center justify-center max-w-lg px-4 text-center">
-            {logoUrl ? (
-              <img
-                key={logoUrl}
-                src={logoUrl}
-                alt=""
-                referrerPolicy="no-referrer"
-                className="max-h-40 sm:max-h-56 w-auto max-w-[320px] sm:max-w-[460px] object-contain drop-shadow-[0_12px_40px_rgba(0,0,0,0.95)] transition-opacity duration-300"
-              />
-            ) : (
-              <h1 className="font-display text-3xl sm:text-5xl font-bold tracking-tight text-white drop-shadow-[0_12px_40px_rgba(0,0,0,0.95)] [text-wrap:balance]">
-                {details?.title || seedItem?.title || 'KinoStream'}
-              </h1>
-            )}
-          </div>
-        </div>
-      )}
+      {/* 2-Second Pure Black Logo Splash Overlay (auto-vanishes with smooth animation) */}
+      <AnimatePresence mode="wait">
+        {splashActive && (
+          <motion.div
+            key={`details-splash-${mediaType}-${mediaId}`}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, scale: 1.06 }}
+            transition={{ duration: 0.42, ease: [0.16, 1, 0.3, 1] }}
+            onClick={() => setSplashActive(false)}
+            className="fixed inset-0 z-[55] bg-black flex items-center justify-center p-6 cursor-pointer select-none"
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 1.08 }}
+              transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
+              className="relative z-10 flex flex-col items-center justify-center max-w-lg px-4 text-center"
+            >
+              {logoUrl ? (
+                <img
+                  key={logoUrl}
+                  src={logoUrl}
+                  alt={details?.title || seedItem?.title || ''}
+                  referrerPolicy="no-referrer"
+                  onError={advanceLogoCandidate}
+                  className="max-h-40 sm:max-h-56 w-auto max-w-[300px] sm:max-w-[440px] object-contain drop-shadow-[0_12px_40px_rgba(0,0,0,0.95)]"
+                />
+              ) : (
+                <h1 className="font-display text-3xl sm:text-5xl font-extrabold tracking-tight text-white [text-wrap:balance]">
+                  {details?.title || seedItem?.title || 'EUTHOPIAR'}
+                </h1>
+              )}
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
       {/* Floating Top-Left Back Button over Full-Bleed Backdrop */}
       <button
         type="button"
@@ -863,8 +923,13 @@ export const MediaDetailsScreen: React.FC<MediaDetailsScreenProps> = ({
               <button
                 type="button"
                 onClick={() => void handleWatchTrailer()}
-                disabled={resolvingAction === 'trailer'}
-                className="flex flex-col items-center gap-1.5 group focus-visible:outline-none disabled:opacity-60"
+                disabled={resolvingAction === 'trailer' || isBengaliTitle}
+                title={
+                  isBengaliTitle
+                    ? 'YouTube playback is disabled for Bengali serials'
+                    : 'Watch official trailer'
+                }
+                className="flex flex-col items-center gap-1.5 group focus-visible:outline-none disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <span className="h-12 w-12 rounded-2xl bg-white/[0.06] border border-white/10 text-slate-200 group-hover:bg-white/[0.12] group-hover:text-white flex items-center justify-center transition-colors">
                   {resolvingAction === 'trailer' ? (

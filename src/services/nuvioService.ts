@@ -97,8 +97,16 @@ function mapManifestToPlugins(scrapers: NuvioScraperInfo[]): NuvioDirectoryRepo[
 function getDefaultInstalledRepos(): InstalledNuvioRepo[] {
   const d3adly = NUVIO_PLUGIN_REPOS.find((r) => r.manifestUrl === DEFAULT_NUVIO_REPO_URL) || NUVIO_PLUGIN_REPOS[1];
   const yoru = NUVIO_PLUGIN_REPOS.find((r) => r.author.toLowerCase() === 'yoruix');
+  const hindiNuvio = NUVIO_PLUGIN_REPOS.find((r) => r.id === 'nuvio-hindi-d3adlyrocket');
+  const cbProviders = NUVIO_PLUGIN_REPOS.find((r) => r.id === 'nuvio-cb-providers');
+  const spidey = NUVIO_PLUGIN_REPOS.find((r) => r.id === 'nuvio-abinanthankv-4');
+  const phisher = NUVIO_PLUGIN_REPOS.find((r) => r.id === 'nuvio-phisher98-2');
   const defaults: InstalledNuvioRepo[] = [];
   if (d3adly) defaults.push(toInstalledRepo(d3adly, true));
+  if (hindiNuvio) defaults.push(toInstalledRepo(hindiNuvio, true));
+  if (cbProviders) defaults.push(toInstalledRepo(cbProviders, true));
+  if (spidey) defaults.push(toInstalledRepo(spidey, true));
+  if (phisher) defaults.push(toInstalledRepo(phisher, true));
   if (yoru && yoru.manifestUrl !== d3adly?.manifestUrl) {
     defaults.push(toInstalledRepo(yoru, true));
   }
@@ -136,16 +144,25 @@ export const nuvioService = {
   getInstalledRepos(): InstalledNuvioRepo[] {
     try {
       const raw = localStorage.getItem(STORAGE_KEYS.INSTALLED_REPOS);
+      const hindiMigrationKey = 'kinostream_nuvio_hindi_migrated_v3';
       if (raw) {
         const parsed = JSON.parse(raw) as InstalledNuvioRepo[];
         if (Array.isArray(parsed) && parsed.length > 0) {
           let changed = false;
           const byId = new Map(NUVIO_PLUGIN_REPOS.map((d) => [d.id, d]));
-          const migrated = parsed.map((r) => {
+          let migrated = parsed.map((r) => {
             const dirMatch = byId.get(r.id);
-            if (dirMatch && dirMatch.manifestUrl && r.manifestUrl !== dirMatch.manifestUrl) {
-              changed = true;
-              return { ...r, manifestUrl: dirMatch.manifestUrl };
+            if (dirMatch) {
+              let nextRepo = r;
+              if (dirMatch.manifestUrl && r.manifestUrl !== dirMatch.manifestUrl) {
+                changed = true;
+                nextRepo = { ...nextRepo, manifestUrl: dirMatch.manifestUrl };
+              }
+              if ((!nextRepo.plugins || nextRepo.plugins.length === 0) && dirMatch.plugins.length > 0) {
+                changed = true;
+                nextRepo = { ...nextRepo, plugins: dirMatch.plugins };
+              }
+              return nextRepo;
             }
             if (r.manifestUrl.includes('phisher98/phisher-nuvio-providers')) {
               changed = true;
@@ -175,11 +192,26 @@ export const nuvioService = {
             }
             return r;
           });
+
+          if (localStorage.getItem(hindiMigrationKey) !== '1') {
+            localStorage.setItem(hindiMigrationKey, '1');
+            const existingIds = new Set(migrated.map((m) => m.id));
+            const existingUrls = new Set(migrated.map((m) => normalizeRepoUrlKey(m.manifestUrl)));
+            for (const reqId of ['nuvio-cb-providers', 'nuvio-hindi-d3adlyrocket', 'nuvio-abinanthankv-4', 'nuvio-phisher98-2']) {
+              const dirRepo = byId.get(reqId);
+              if (dirRepo && !existingIds.has(dirRepo.id) && !existingUrls.has(normalizeRepoUrlKey(dirRepo.manifestUrl))) {
+                migrated = [toInstalledRepo(dirRepo, true), ...migrated];
+                changed = true;
+              }
+            }
+          }
+
           if (changed) this.saveInstalledRepos(migrated);
           return migrated;
         }
       }
     } catch {}
+    localStorage.setItem('kinostream_nuvio_hindi_migrated_v3', '1');
     const defaults = getDefaultInstalledRepos();
     this.saveInstalledRepos(defaults);
     return defaults;
@@ -407,69 +439,99 @@ export const nuvioService = {
       const timerFn = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
       const clearTimerFn = typeof window !== 'undefined' ? window.clearTimeout : clearTimeout;
 
-      await Promise.allSettled(
-        manifestUrls.map(async (repoUrl, repoIdx) => {
-          const controller = new AbortController();
-          const timeout = timerFn(() => controller.abort(), 38000);
-          try {
-            const endpoint = `/api/nuvio/streams?tmdbId=${params.tmdbId}&mediaType=${params.mediaType}&season=${season}&episode=${episode}&manifestUrl=${encodeURIComponent(repoUrl)}${disabledIdsParam}${titleParam}${yearParam}`;
-            const res = await fetch(endpoint, { signal: controller.signal });
-            if (!res.ok) return;
+      const hasDedicatedCbRepo = manifestUrls.some((u) => /cb-providers/i.test(u));
 
-            const data = (await res.json()) as {
-              sources?: StreamSource[];
-              subtitles?: SubtitleTrack[];
-              scraperResults?: NuvioScraperRunResult[];
-            };
+      const processEndpoint = async (
+        endpoint: string,
+        repoIdx: number,
+        timeoutMs: number
+      ) => {
+        const controller = new AbortController();
+        const timeout = timerFn(() => controller.abort(), timeoutMs);
+        try {
+          const res = await fetch(endpoint, { signal: controller.signal });
+          if (!res.ok) return;
 
-            const batchSources: StreamSource[] = [];
-            const batchSubtitles: SubtitleTrack[] = [];
+          const data = (await res.json()) as {
+            sources?: StreamSource[];
+            subtitles?: SubtitleTrack[];
+            scraperResults?: NuvioScraperRunResult[];
+          };
 
-            for (const src of data.sources || []) {
-              if (!matchesNuvioEpisode(src)) continue;
-              const dedupeKey = `${src.url}::${src.audioLanguage || ''}`;
-              if (src.url && !seenSourceKeys.has(dedupeKey)) {
-                seenSourceKeys.add(dedupeKey);
-                let safeId = src.id;
-                if (seenSourceIds.has(safeId)) {
-                  safeId = `${src.id}-r${repoIdx}`;
-                }
-                while (seenSourceIds.has(safeId)) {
-                  safeId = `${safeId}-${seenSourceIds.size}`;
-                }
-                seenSourceIds.add(safeId);
-                const cleanSrc = { ...src, id: safeId };
-                allSources.push(cleanSrc);
-                batchSources.push(cleanSrc);
+          const batchSources: StreamSource[] = [];
+          const batchSubtitles: SubtitleTrack[] = [];
+
+          for (const src of data.sources || []) {
+            if (!matchesNuvioEpisode(src)) continue;
+            const dedupeKey = `${src.url}::${src.audioLanguage || ''}`;
+            if (src.url && !seenSourceKeys.has(dedupeKey)) {
+              seenSourceKeys.add(dedupeKey);
+              let safeId = src.id;
+              if (seenSourceIds.has(safeId)) {
+                safeId = `${src.id}-r${repoIdx}`;
               }
-            }
-            for (const sub of data.subtitles || []) {
-              let safeSubId = sub.id;
-              if (seenSubIds.has(safeSubId)) {
-                safeSubId = `${sub.id}-r${repoIdx}`;
+              while (seenSourceIds.has(safeId)) {
+                safeId = `${safeId}-${seenSourceIds.size}`;
               }
-              while (seenSubIds.has(safeSubId)) {
-                safeSubId = `${safeSubId}-${seenSubIds.size}`;
-              }
-              seenSubIds.add(safeSubId);
-              const cleanSub = { ...sub, id: safeSubId };
-              allSubtitles.push(cleanSub);
-              batchSubtitles.push(cleanSub);
+              seenSourceIds.add(safeId);
+              const cleanSrc = { ...src, id: safeId };
+              allSources.push(cleanSrc);
+              batchSources.push(cleanSrc);
             }
-            for (const sr of data.scraperResults || []) {
-              allScraperResults.push(sr);
-            }
-
-            if ((batchSources.length > 0 || batchSubtitles.length > 0) && onBatch) {
-              onBatch({ sources: batchSources, subtitles: batchSubtitles });
-            }
-          } catch {
-            // Skip unreachable Nuvio repo
-          } finally {
-            clearTimerFn(timeout);
           }
-        })
-      );
+          for (const sub of data.subtitles || []) {
+            let safeSubId = sub.id;
+            if (seenSubIds.has(safeSubId)) {
+              safeSubId = `${sub.id}-r${repoIdx}`;
+            }
+            while (seenSubIds.has(safeSubId)) {
+              safeSubId = `${safeSubId}-${seenSubIds.size}`;
+            }
+            seenSubIds.add(safeSubId);
+            const cleanSub = { ...sub, id: safeSubId };
+            allSubtitles.push(cleanSub);
+            batchSubtitles.push(cleanSub);
+          }
+          for (const sr of data.scraperResults || []) {
+            allScraperResults.push(sr);
+          }
+
+          if ((batchSources.length > 0 || batchSubtitles.length > 0) && onBatch) {
+            onBatch({ sources: batchSources, subtitles: batchSubtitles });
+          }
+        } catch {
+          // Skip unreachable Nuvio repo
+        } finally {
+          clearTimerFn(timeout);
+        }
+      };
+
+      // Wave 1 (Fast-Lane): fire high-speed verified Hindi/direct scrapers immediately
+      const fastLaneUrls = manifestUrls
+        .filter((u) => /All-in-One-Nuvio|cb-providers|hindi-nuvio|phisher|abinanthankv/i.test(u))
+        .slice(0, 5);
+      if (fastLaneUrls.length === 0 && manifestUrls[0]) {
+        fastLaneUrls.push(manifestUrls[0]);
+      }
+      const fastLaneUrlSet = new Set(fastLaneUrls);
+
+      const fastJobs = fastLaneUrls.map((repoUrl, idx) => {
+        const skipCbParam =
+          hasDedicatedCbRepo && /All-in-One-Nuvio/i.test(repoUrl) ? '&skipCb=1' : '';
+        const endpoint = `/api/nuvio/streams?tmdbId=${params.tmdbId}&mediaType=${params.mediaType}&season=${season}&episode=${episode}&lane=fast&manifestUrl=${encodeURIComponent(repoUrl)}${skipCbParam}${disabledIdsParam}${titleParam}${yearParam}`;
+        return processEndpoint(endpoint, 900 + idx, 15000);
+      });
+
+      // Wave 2 (Full Repos): run remaining non-fast scrapers concurrently without duplicating fast-lane scrapers
+      const fullJobs = manifestUrls.map((repoUrl, repoIdx) => {
+        const skipCbParam =
+          hasDedicatedCbRepo && /All-in-One-Nuvio/i.test(repoUrl) ? '&skipCb=1' : '';
+        const excludeFastParam = fastLaneUrlSet.has(repoUrl) ? '&excludeFast=1' : '';
+        const endpoint = `/api/nuvio/streams?tmdbId=${params.tmdbId}&mediaType=${params.mediaType}&season=${season}&episode=${episode}${excludeFastParam}&manifestUrl=${encodeURIComponent(repoUrl)}${skipCbParam}${disabledIdsParam}${titleParam}${yearParam}`;
+        return processEndpoint(endpoint, repoIdx, 24000);
+      });
+
+      await Promise.allSettled([...fastJobs, ...fullJobs]);
 
       return {
         sources: allSources,
@@ -517,6 +579,8 @@ export const nuvioService = {
     results: Record<string, { status: 'online' | 'degraded' | 'offline'; latency: number; detail?: string }>;
     summary: { total: number; online: number; degraded: number; offline: number };
     checkedAt: number;
+    transportFailed?: boolean;
+    errorMessage?: string;
   }> {
     if (targets.length === 0) {
       return {
@@ -526,64 +590,119 @@ export const nuvioService = {
       };
     }
 
-    const CHUNK_SIZE = 18;
-    const allResults: Record<string, { status: 'online' | 'degraded' | 'offline'; latency: number; detail?: string }> = {};
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+      return {
+        results: {},
+        summary: { total: 0, online: 0, degraded: 0, offline: 0 },
+        checkedAt: Date.now(),
+        transportFailed: true,
+        errorMessage: 'You are currently offline. Connect to the internet and retry health check.',
+      };
+    }
+
+    type ProbeOutcome = { status: 'online' | 'degraded' | 'offline'; latency: number; detail?: string };
+
+    const probeChunkViaServer = async (
+      chunk: Array<{ key: string; kind: 'stremio' | 'nuvio' | 'cloudstream' | 'core'; url: string; name?: string }>
+    ): Promise<Record<string, ProbeOutcome> | null> => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => controller.abort(), 25000);
+        try {
+          const res = await fetch('/api/providers/health', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+            body: JSON.stringify({ targets: chunk }),
+            signal: controller.signal,
+          });
+          const ctype = (res.headers.get('content-type') || '').toLowerCase();
+          if (res.ok && ctype.includes('application/json')) {
+            const data = (await res.json()) as {
+              ok?: boolean;
+              results?: Record<string, ProbeOutcome>;
+            };
+            if (data && data.results && typeof data.results === 'object' && Object.keys(data.results).length > 0) {
+              return data.results;
+            }
+          }
+        } catch {
+          // Retry once after brief backoff
+        } finally {
+          window.clearTimeout(timer);
+        }
+        if (attempt === 0) {
+          await new Promise((r) => window.setTimeout(r, 350));
+        }
+      }
+      return null;
+    };
+
+    const probeChunkDirectBrowser = async (
+      chunk: Array<{ key: string; kind: 'stremio' | 'nuvio' | 'cloudstream' | 'core'; url: string; name?: string }>
+    ): Promise<{ results: Record<string, ProbeOutcome>; anySuccess: boolean }> => {
+      const out: Record<string, ProbeOutcome> = {};
+      let anySuccess = false;
+      const BATCH = 6;
+      for (let i = 0; i < chunk.length; i += BATCH) {
+        await Promise.allSettled(
+          chunk.slice(i, i + BATCH).map(async (item) => {
+            const normalizedUrl = item.url.trim().replace(/^stremio:\/\//i, 'https://');
+            const start = Date.now();
+            const controller = new AbortController();
+            const timer = window.setTimeout(() => controller.abort(), 4500);
+            try {
+              const r = await fetch(normalizedUrl, { signal: controller.signal });
+              const latency = Date.now() - start;
+              if (r.ok) {
+                anySuccess = true;
+                out[item.key] = {
+                  status: latency >= 2500 ? 'degraded' : 'online',
+                  latency,
+                  detail: 'Direct OK',
+                };
+              } else if (r.status === 429) {
+                anySuccess = true;
+                out[item.key] = { status: 'degraded', latency, detail: 'Rate limited' };
+              } else {
+                out[item.key] = { status: 'offline', latency, detail: `HTTP ${r.status}` };
+              }
+            } catch {
+              out[item.key] = { status: 'offline', latency: Date.now() - start, detail: 'Unreachable' };
+            } finally {
+              window.clearTimeout(timer);
+            }
+          })
+        );
+      }
+      return { results: out, anySuccess };
+    };
+
+    const CHUNK_SIZE = 12;
+    const allResults: Record<string, ProbeOutcome> = {};
+    let serverFailedChunks = 0;
+    let totalChunks = 0;
+    let directAnySuccess = false;
 
     for (let i = 0; i < targets.length; i += CHUNK_SIZE) {
+      totalChunks++;
       const chunk = targets.slice(i, i + CHUNK_SIZE);
-      const controller = new AbortController();
-      const timer = window.setTimeout(() => controller.abort(), 45000);
+      const serverChunk = await probeChunkViaServer(chunk);
 
-      try {
-        const res = await fetch('/api/providers/health', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ targets: chunk }),
-          signal: controller.signal,
-        });
-
-        if (res.ok) {
-          const data = (await res.json()) as {
-            results?: Record<
-              string,
-              { status: 'online' | 'degraded' | 'offline'; latency: number; detail?: string }
-            >;
-          };
-          const chunkMap = data.results || {};
-          for (const [k, v] of Object.entries(chunkMap)) {
-            allResults[k] = v;
-          }
-          if (onProgress) {
-            onProgress(chunkMap);
-          }
-        } else {
-          for (const item of chunk) {
-            const fail = { status: 'offline' as const, latency: 0, detail: `HTTP ${res.status}` };
-            allResults[item.key] = fail;
-          }
-          if (onProgress) {
-            const fallbackMap: Record<string, { status: 'offline'; latency: number; detail: string }> = {};
-            for (const item of chunk) {
-              fallbackMap[item.key] = { status: 'offline', latency: 0, detail: `HTTP ${res.status}` };
-            }
-            onProgress(fallbackMap);
-          }
+      if (serverChunk) {
+        for (const [k, v] of Object.entries(serverChunk)) {
+          allResults[k] = v;
         }
-      } catch (err) {
-        const isTimeout = err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
-        const detail = isTimeout ? 'Request timeout' : 'Unreachable';
-        const chunkFails: Record<string, { status: 'offline'; latency: number; detail: string }> = {};
-        for (const item of chunk) {
-          const fail = { status: 'offline' as const, latency: 0, detail };
-          allResults[item.key] = fail;
-          chunkFails[item.key] = fail;
-        }
-        if (onProgress) {
-          onProgress(chunkFails);
-        }
-      } finally {
-        window.clearTimeout(timer);
+        if (onProgress) onProgress(serverChunk);
+        continue;
       }
+
+      serverFailedChunks++;
+      const direct = await probeChunkDirectBrowser(chunk);
+      if (direct.anySuccess) directAnySuccess = true;
+      for (const [k, v] of Object.entries(direct.results)) {
+        allResults[k] = v;
+      }
+      if (onProgress) onProgress(direct.results);
     }
 
     const values = Object.values(allResults);
@@ -591,10 +710,17 @@ export const nuvioService = {
     const degraded = values.filter((v) => v.status === 'degraded').length;
     const offline = values.filter((v) => v.status === 'offline').length;
 
+    const completeTransportFailure =
+      serverFailedChunks === totalChunks && !directAnySuccess && online === 0 && degraded === 0;
+
     return {
       results: allResults,
       summary: { total: values.length, online, degraded, offline },
       checkedAt: Date.now(),
+      transportFailed: completeTransportFailure,
+      errorMessage: completeTransportFailure
+        ? 'Provider health check failed to connect. Verify server/network connectivity and retry.'
+        : undefined,
     };
   },
 };

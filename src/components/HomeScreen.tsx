@@ -153,7 +153,64 @@ export const HomeScreen: React.FC = () => {
   const [homeTab, setHomeTab] = useState<'all' | 'movies' | 'series'>('all');
   const [heroIndex, setHeroIndex] = useState(0);
   const [heroPaused, setHeroPaused] = useState(false);
-  const [heroLogos, setHeroLogos] = useState<Record<string, string | null>>({});
+  const [heroLogos, setHeroLogos] = useState<Record<string, { candidates: string[]; idx: number }>>({});
+
+  // iOS-style rubber-band pull-to-stretch state & refs
+  const [pullDistance, setPullDistance] = useState(0);
+  const [isPulling, setIsPulling] = useState(false);
+  const pointerDownRef = useRef(false);
+  const startYRef = useRef<number>(0);
+
+  const handleHeroTouchStart = (e: React.TouchEvent) => {
+    if (window.scrollY > 2) return;
+    const targetEl = e.target as HTMLElement | null;
+    if (targetEl?.closest('button, a, input, select')) return;
+    if (e.touches && e.touches[0]) {
+      pointerDownRef.current = true;
+      startYRef.current = e.touches[0].clientY;
+    }
+  };
+
+  const handleHeroTouchMove = (e: React.TouchEvent) => {
+    if (!pointerDownRef.current || !e.touches || !e.touches[0]) return;
+    if (window.scrollY > 2) {
+      pointerDownRef.current = false;
+      setPullDistance(0);
+      setIsPulling(false);
+      return;
+    }
+    const delta = e.touches[0].clientY - startYRef.current;
+    if (delta > 12) {
+      if (!isPulling) setIsPulling(true);
+      const rubber = Math.min(100, Math.pow(delta - 12, 0.8) * 0.45);
+      setPullDistance(rubber);
+    } else if (delta <= 0) {
+      setPullDistance(0);
+      setIsPulling(false);
+    }
+  };
+
+  const handleHeroTouchEnd = useCallback(() => {
+    pointerDownRef.current = false;
+    setIsPulling(false);
+    setPullDistance(0);
+  }, []);
+
+  useEffect(() => {
+    const onGlobalRelease = () => {
+      if (pointerDownRef.current || isPulling) {
+        handleHeroTouchEnd();
+      }
+    };
+    window.addEventListener('mouseup', onGlobalRelease);
+    window.addEventListener('touchend', onGlobalRelease);
+    window.addEventListener('touchcancel', onGlobalRelease);
+    return () => {
+      window.removeEventListener('mouseup', onGlobalRelease);
+      window.removeEventListener('touchend', onGlobalRelease);
+      window.removeEventListener('touchcancel', onGlobalRelease);
+    };
+  }, [isPulling, handleHeroTouchEnd]);
 
   useEffect(() => {
     let active = true;
@@ -263,20 +320,26 @@ export const HomeScreen: React.FC = () => {
 
   const activeHero = heroSlides[heroIndex % Math.max(1, heroSlides.length)];
   const activeHeroKey = activeHero ? `${activeHero.mediaType}:${activeHero.id}` : '';
-  const activeHeroLogo = activeHeroKey ? heroLogos[activeHeroKey] : null;
+  const activeHeroLogoEntry = activeHeroKey ? heroLogos[activeHeroKey] : undefined;
+  const activeHeroLogo =
+    activeHeroLogoEntry && activeHeroLogoEntry.idx < activeHeroLogoEntry.candidates.length
+      ? activeHeroLogoEntry.candidates[activeHeroLogoEntry.idx]
+      : null;
   const heroSaved = activeHero ? isInWatchlist(activeHero.id, activeHero.mediaType) : false;
 
-  // Fetch official title logo for current hero slide (cached in tmdbService)
+  // Fetch official title logo candidates for current hero slide (cached in tmdbService)
   useEffect(() => {
     if (!activeHero) return;
     const key = `${activeHero.mediaType}:${activeHero.id}`;
     if (key in heroLogos) return;
     let active = true;
-    tmdbService.getMediaLogo(activeHero.id, activeHero.mediaType).then((logoUrl) => {
-      if (active) {
-        setHeroLogos((prev) => ({ ...prev, [key]: logoUrl }));
-      }
-    });
+    tmdbService
+      .getMediaLogoCandidates(activeHero.id, activeHero.mediaType, activeHero.imdbId)
+      .then((candidates) => {
+        if (active) {
+          setHeroLogos((prev) => ({ ...prev, [key]: { candidates, idx: 0 } }));
+        }
+      });
     return () => {
       active = false;
     };
@@ -365,18 +428,32 @@ export const HomeScreen: React.FC = () => {
       {/* Featured Full-Bleed Auto-Rotating Hero Banner */}
       {activeHero ? (
         <section
-          className="relative w-full min-h-[470px] sm:min-h-[540px] lg:min-h-[580px] overflow-hidden bg-[#050609]"
+          className="relative w-full min-h-[470px] sm:min-h-[540px] lg:min-h-[580px] overflow-hidden bg-[#050609] select-none touch-pan-y"
           onMouseEnter={() => setHeroPaused(true)}
-          onMouseLeave={() => setHeroPaused(false)}
+          onMouseLeave={() => {
+            setHeroPaused(false);
+            handleHeroTouchEnd();
+          }}
+          onTouchStart={handleHeroTouchStart}
+          onTouchMove={handleHeroTouchMove}
+          onTouchEnd={handleHeroTouchEnd}
+          style={{
+            transform: `translateY(${pullDistance * 0.3}px)`,
+            transition: isPulling ? 'none' : 'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+          }}
         >
-          <AnimatePresence mode="wait">
+          <AnimatePresence>
             <motion.div
               key={`${activeHero.mediaType}-${activeHero.id}`}
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              transition={{ duration: 0.35, ease: 'easeOut' }}
+              transition={{ duration: 0.45, ease: 'easeOut' }}
               className="absolute inset-0"
+              style={{
+                transform: `scale(${1 + pullDistance / 240}) translateY(${pullDistance * 0.1}px)`,
+                transition: isPulling ? 'none' : 'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+              }}
             >
               {/* Mobile portrait framing matches screenshot hero proportions */}
               <div className="sm:hidden h-full w-full">
@@ -408,14 +485,29 @@ export const HomeScreen: React.FC = () => {
           <div className="absolute inset-0 bg-gradient-to-t from-[#050609] via-[#050609]/55 to-transparent pointer-events-none" />
           <div className="hidden sm:block absolute inset-0 bg-gradient-to-r from-[#050609]/85 via-[#050609]/25 to-transparent pointer-events-none" />
 
-          <div className="relative z-10 flex flex-col justify-end min-h-[470px] sm:min-h-[540px] lg:min-h-[580px] px-4 sm:px-6 lg:px-8 pt-20 pb-5 sm:pb-8 max-w-2xl lg:max-w-3xl">
+          <div
+            className="relative z-10 flex flex-col justify-end min-h-[470px] sm:min-h-[540px] lg:min-h-[580px] px-4 sm:px-6 lg:px-8 pt-20 pb-5 sm:pb-8 max-w-2xl lg:max-w-3xl"
+            style={{
+              transform: `translateY(${pullDistance * 0.65}px)`,
+              transition: isPulling ? 'none' : 'transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275)',
+            }}
+          >
             {/* Title Logo PNG (when available) or crisp display title */}
             <div className="mb-3.5">
               {activeHeroLogo ? (
                 <img
+                  key={activeHeroLogo}
                   src={activeHeroLogo}
                   alt={activeHero.title}
                   referrerPolicy="no-referrer"
+                  onError={() => {
+                    if (!activeHeroKey) return;
+                    setHeroLogos((prev) => {
+                      const curr = prev[activeHeroKey];
+                      if (!curr) return prev;
+                      return { ...prev, [activeHeroKey]: { ...curr, idx: curr.idx + 1 } };
+                    });
+                  }}
                   className="max-h-[76px] sm:max-h-[96px] max-w-[240px] sm:max-w-[340px] w-auto object-contain object-left drop-shadow-[0_6px_20px_rgba(0,0,0,0.85)]"
                 />
               ) : (
@@ -713,8 +805,8 @@ export const HomeScreen: React.FC = () => {
       {/* Bengali Cartoons & Family */}
       {homeTab !== 'movies' && bengaliCartoons.length > 0 && (
         <CarouselRow title="Bengali Cartoons & Family">
-          {bengaliCartoons.map((item) => (
-            <div key={`bntoon-${item.bengaliSerialSlug || item.id}`} className="shrink-0 w-[196px] sm:w-[228px]">
+          {bengaliCartoons.map((item, bIdx) => (
+            <div key={`bntoon-${item.bengaliSerialSlug || item.id}-${bIdx}`} className="shrink-0 w-[196px] sm:w-[228px]">
               <MediaCard
                 item={item}
                 aspect="landscape"
@@ -737,7 +829,7 @@ export const HomeScreen: React.FC = () => {
                 />
               ))
             : popularSeries.map((item) => (
-                <div key={`tv-${item.id}`} className="shrink-0 w-[142px] sm:w-[164px]">
+                <div key={`series-${item.mediaType}-${item.id}`} className="shrink-0 w-[142px] sm:w-[164px]">
                   <MediaCard item={item} posterOnly onQuickPlay={handleHeroPlay} />
                 </div>
               ))}

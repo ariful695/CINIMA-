@@ -5,6 +5,13 @@ export interface Genre {
   name: string;
 }
 
+export type CatalogSourceTag =
+  | 'TMDB'
+  | 'Archive.org'
+  | 'Dejavu'
+  | 'Bengali Serials'
+  | 'Curated Fallback';
+
 export interface MediaItem {
   id: number;
   mediaType: MediaType;
@@ -20,6 +27,8 @@ export interface MediaItem {
   subtitleLanguages?: string[];
   popularity?: number;
   imdbId?: string;
+  /** Optional source attribution tag for catalog & search items */
+  sourceTag?: CatalogSourceTag;
   /** Optional Dejavu-API item id when resolved from Dejavu-API */
   dejavuId?: string;
   /** Optional Internet Archive identifier (e.g., night_of_the_living_dead) */
@@ -92,6 +101,7 @@ export interface PersonSearchResult {
 export interface MultiSearchResults {
   moviesAndShows: MediaItem[];
   people: PersonSearchResult[];
+  isFallback?: boolean;
 }
 
 export interface SubtitleTrack {
@@ -127,7 +137,7 @@ export interface StreamResolutionResult {
   subtitles: SubtitleTrack[];
 }
 
-export type LiveCategory = 'All' | 'News' | 'Sports' | 'Entertainment' | 'Movies';
+export type LiveCategory = 'All' | 'Sports' | 'News' | 'Entertainment' | 'Movies' | 'Kids' | 'Favorites';
 
 export interface LiveChannel {
   id: string;
@@ -141,16 +151,6 @@ export interface LiveChannel {
   tvgId?: string;
   country?: string;
   language?: string;
-}
-
-export interface M3UPlaylistSource {
-  id: string;
-  name: string;
-  url: string;
-  rawContent?: string;
-  enabled: boolean;
-  channelCount?: number;
-  lastSyncedAt?: string;
 }
 
 export interface JsonStreamEndpoint {
@@ -298,6 +298,7 @@ export interface PlayerSession {
   initialTime?: number;
   preferredSourceId?: string;
   liveChannel?: LiveChannel;
+  fallbackFeeds?: LiveChannel[];
   initialSources?: StreamSource[];
   initialSubtitles?: SubtitleTrack[];
   bengaliSerialSlug?: string;
@@ -319,6 +320,7 @@ export interface ServerPickerTarget {
   genreIds?: number[];
   originalLanguage?: string;
   releaseYear?: number;
+  runtimeMinutes?: number;
   seasonNumber?: number;
   episodeNumber?: number;
   episodeTitle?: string;
@@ -442,6 +444,7 @@ export interface CloudStreamRepository {
   description: string;
   author?: string;
   icon?: string;
+  tags?: string[];
   downloadedCount: number;
   totalCount: number;
   providers: CloudStreamProviderItem[];

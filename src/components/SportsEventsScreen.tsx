@@ -1,11 +1,14 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
+  AlertTriangle,
   CalendarClock,
   CheckCircle2,
   ClipboardList,
   Globe,
   Heart,
+  KeyRound,
   Radio,
+  RefreshCw,
   Sparkles,
   Trophy,
   Tv,
@@ -113,6 +116,12 @@ export const SportsEventsScreen: React.FC<SportsEventsScreenProps> = ({
   const [events, setEvents] = useState<SportsEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [apiConfigured, setApiConfigured] = useState(true);
+  const [usingFallback, setUsingFallback] = useState(false);
+  const [authError, setAuthError] = useState(false);
+  const [showKeySetup, setShowKeySetup] = useState(false);
+  const [rapidApiInput, setRapidApiInput] = useState('');
+  const [hasKeyOverride, setHasKeyOverride] = useState(() => cricbuzzService.hasApiKeyOverride());
 
   const [selectedCategory, setSelectedCategory] = useState<SportCategory>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | SportsEventStatus>('all');
@@ -128,6 +137,10 @@ export const SportsEventsScreen: React.FC<SportsEventsScreenProps> = ({
       const res = await cricbuzzService.fetchSportsEvents(liveChannels, force);
       setEvents(res.events);
       setErrorMsg(res.error || null);
+      setApiConfigured(res.apiConfigured);
+      setUsingFallback(res.usingFallback);
+      setAuthError(Boolean(res.authError));
+      setHasKeyOverride(cricbuzzService.hasApiKeyOverride());
       if (!silent) {
         setLoading(false);
         onLoadingChange?.(false);
@@ -135,6 +148,24 @@ export const SportsEventsScreen: React.FC<SportsEventsScreenProps> = ({
     },
     [liveChannels, onLoadingChange]
   );
+
+  const handleSaveApiKey = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = rapidApiInput.trim();
+    if (!clean) return;
+    cricbuzzService.saveApiKeyOverride(clean);
+    setRapidApiInput('');
+    setShowKeySetup(false);
+    setHasKeyOverride(true);
+    void loadEvents(true, false);
+  };
+
+  const handleResetApiKey = () => {
+    cricbuzzService.clearApiKeyOverride();
+    setRapidApiInput('');
+    setHasKeyOverride(false);
+    void loadEvents(true, false);
+  };
 
   useEffect(() => {
     void loadEvents(refreshTick > 0, false);
@@ -212,6 +243,21 @@ export const SportsEventsScreen: React.FC<SportsEventsScreenProps> = ({
       const ev = selectedEventForModal;
       setSelectedEventForModal(null);
 
+      const fallbackFeeds = ev.channels
+        .filter((c) => c.id !== channel.id && Boolean(c.streamUrl))
+        .sort((a, b) => Number(Boolean(b.isVerifiedPlayable)) - Number(Boolean(a.isVerifiedPlayable)))
+        .map((c) => ({
+          id: `${ev.id}-${c.id}`,
+          name: c.name,
+          group: 'Sports',
+          logo: c.logo,
+          streamUrl: c.streamUrl,
+          playlistId: 'sports-events',
+          playlistName: c.playlistName || ev.leagueName,
+          isLive: true,
+          country: c.country,
+        }));
+
       startPlayback({
         mediaId:
           ev.matchId ||
@@ -230,6 +276,7 @@ export const SportsEventsScreen: React.FC<SportsEventsScreenProps> = ({
           isLive: true,
           country: channel.country,
         },
+        fallbackFeeds,
       });
     },
     [selectedEventForModal, startPlayback]
@@ -388,10 +435,77 @@ export const SportsEventsScreen: React.FC<SportsEventsScreenProps> = ({
         </button>
       </div>
 
-      {/* API Error Notice */}
-      {errorMsg && (
-        <div className="rounded-2xl bg-amber-500/10 border border-amber-400/30 px-4 py-3 text-xs text-amber-200">
-          {errorMsg}
+      {/* Cricbuzz API Setup / Cached & Public Schedule Banner */}
+      {(errorMsg || !apiConfigured || usingFallback) && (
+        <div className="rounded-2xl bg-amber-500/10 border border-amber-400/30 px-4 py-3.5 space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5 min-w-0">
+              <AlertTriangle className="h-4 w-4 text-amber-300 shrink-0 mt-0.5" />
+              <div className="space-y-0.5 text-xs">
+                <p className="font-semibold text-amber-100">
+                  {!apiConfigured || authError
+                    ? 'Cricbuzz RapidAPI Key Setup'
+                    : 'Showing Cached / Public Cricket Schedule'}
+                </p>
+                <p className="text-amber-200/90 leading-relaxed">
+                  {errorMsg ||
+                    'Live RapidAPI scores are currently offline. Verified sports channels remain playable on every fixture card.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 flex-wrap shrink-0">
+              <button
+                type="button"
+                onClick={() => setShowKeySetup((v) => !v)}
+                className="min-h-[44px] px-3.5 rounded-xl bg-amber-400/20 hover:bg-amber-400/30 border border-amber-300/35 text-xs font-semibold text-amber-100 inline-flex items-center gap-1.5 transition-colors"
+              >
+                <KeyRound className="h-3.5 w-3.5" />
+                <span>{showKeySetup ? 'Close Key Setup' : 'Configure API Key'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void loadEvents(true, false)}
+                className="min-h-[44px] px-3.5 rounded-xl bg-white/[0.08] hover:bg-white/[0.15] border border-white/15 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
+              >
+                <RefreshCw className="h-3.5 w-3.5" />
+                <span>Retry</span>
+              </button>
+            </div>
+          </div>
+
+          {showKeySetup && (
+            <form
+              onSubmit={handleSaveApiKey}
+              className="pt-2 border-t border-amber-400/20 flex flex-col sm:flex-row items-stretch sm:items-center gap-2"
+            >
+              <input
+                type="password"
+                value={rapidApiInput}
+                onChange={(e) => setRapidApiInput(e.target.value)}
+                placeholder="Paste your Cricbuzz RapidAPI x-rapidapi-key..."
+                aria-label="Cricbuzz RapidAPI Key"
+                className="flex-1 min-h-[44px] px-3.5 rounded-xl bg-black/45 border border-white/15 text-xs text-white placeholder:text-slate-400 focus:outline-none focus:border-amber-300"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  type="submit"
+                  className="min-h-[44px] px-4 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold transition-colors"
+                >
+                  Save Key
+                </button>
+                {hasKeyOverride && (
+                  <button
+                    type="button"
+                    onClick={handleResetApiKey}
+                    className="min-h-[44px] px-3.5 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-semibold text-slate-200 transition-colors"
+                  >
+                    Use Default
+                  </button>
+                )}
+              </div>
+            </form>
+          )}
         </div>
       )}
 

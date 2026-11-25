@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Activity,
   ArrowLeft,
   Boxes,
@@ -25,13 +26,18 @@ import {
   STREMIO_ADDONS_NET_DIRECTORY,
   StremioNetDirectoryAddon,
 } from '../data/nuvioAndStremioCatalog';
+import {
+  LiveSourceProbeResult,
+  liveTvAddonService,
+  UnifiedLiveSource,
+} from '../services/liveTvAddonService';
 import { InstalledNuvioRepo, nuvioService } from '../services/nuvioService';
 import { normalizeStremioUrlKey } from '../services/stremioAddonService';
 import { ProviderHealthEntry, useAppState } from '../state/AppContext';
 import { CloudStreamRepository, StremioAddonConfig } from '../types/media';
 import { TokenCreditStatusBadge } from './TokenCreditStatusBadge';
 
-type DirectoryTab = 'cloudstream' | 'nuvio' | 'stremio';
+type DirectoryTab = 'cloudstream' | 'nuvio' | 'stremio' | 'live';
 type StremioCategoryTab =
   | 'All'
   | 'Streams'
@@ -44,6 +50,7 @@ type StremioCategoryTab =
 export const ExtensionsScreen: React.FC = () => {
   const {
     stremioAddons,
+    addStremioAddon,
     removeStremioAddon,
     toggleStremioAddon,
     installStremioDirectoryItem,
@@ -71,9 +78,18 @@ export const ExtensionsScreen: React.FC = () => {
 
   const [directoryTab, setDirectoryTab] = useState<DirectoryTab>('cloudstream');
 
+  // Unified Live TV Sources tab state
+  const [liveProbeMap, setLiveProbeMap] = useState<Record<string, LiveSourceProbeResult>>({});
+  const [isProbingAllLive, setIsProbingAllLive] = useState(false);
+  const [showLiveAddForm, setShowLiveAddForm] = useState(false);
+  const [liveSourceName, setLiveSourceName] = useState('');
+  const [liveSourceInput, setLiveSourceInput] = useState('');
+  const [isAddingLiveSource, setIsAddingLiveSource] = useState(false);
+  const [liveFormError, setLiveFormError] = useState<string | null>(null);
+
   const [selectedRepoId, setSelectedRepoId] = useState<string | null>(null);
   const [categoryTab, setCategoryTab] = useState<
-    'All' | 'Series' | 'Livestream' | 'Movies' | 'Anime' | 'Others'
+    'All' | 'Hindi' | 'Series' | 'Movies' | 'Anime' | 'Livestream' | 'Others'
   >('All');
 
   const [selectedNuvioRepoId, setSelectedNuvioRepoId] = useState<string | null>(null);
@@ -296,15 +312,24 @@ export const ExtensionsScreen: React.FC = () => {
   const notDownloaded = Math.max(0, totalProviders - totalDownloaded);
 
   const filteredRepos = useMemo(() => {
-    const q = searchQuery.toLowerCase();
+    const q = searchQuery.toLowerCase().trim();
     const seen = new Set<string>();
     return repositories.filter((r) => {
       if (!r?.id || seen.has(r.id)) return false;
       seen.add(r.id);
+      if (!q) return true;
       return (
         r.name.toLowerCase().includes(q) ||
         (r.author && r.author.toLowerCase().includes(q)) ||
-        (r.description && r.description.toLowerCase().includes(q))
+        (r.description && r.description.toLowerCase().includes(q)) ||
+        (r.tags && r.tags.some((t) => t.toLowerCase().includes(q))) ||
+        (r.providers &&
+          r.providers.some(
+            (p) =>
+              p.name.toLowerCase().includes(q) ||
+              (p.lang && p.lang.toLowerCase().includes(q)) ||
+              (q === 'hindi' && p.lang === 'Hindi')
+          ))
       );
     });
   }, [repositories, searchQuery]);
@@ -312,13 +337,19 @@ export const ExtensionsScreen: React.FC = () => {
   const filteredProviders = useMemo(() => {
     if (!selectedRepo) return [];
     const seen = new Set<string>();
+    const q = searchQuery.toLowerCase().trim();
     return selectedRepo.providers.filter((p) => {
       if (!p?.id || seen.has(p.id)) return false;
       seen.add(p.id);
       const matchesSearch =
-        p.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        p.description.toLowerCase().includes(searchQuery.toLowerCase());
-      const matchesCat = categoryTab === 'All' || p.type === categoryTab;
+        !q ||
+        p.name.toLowerCase().includes(q) ||
+        p.description.toLowerCase().includes(q) ||
+        (p.lang && p.lang.toLowerCase().includes(q)) ||
+        (q === 'hindi' && p.lang === 'Hindi');
+      const matchesCat =
+        categoryTab === 'All' ||
+        (categoryTab === 'Hindi' ? p.lang === 'Hindi' : p.type === categoryTab);
       return matchesSearch && matchesCat;
     });
   }, [selectedRepo, searchQuery, categoryTab]);
@@ -371,7 +402,18 @@ export const ExtensionsScreen: React.FC = () => {
         dir.name.toLowerCase().includes(q) ||
         dir.author.toLowerCase().includes(q) ||
         dir.description.toLowerCase().includes(q) ||
-        dir.plugins.some((p) => p.name.toLowerCase().includes(q))
+        (dir.tags && dir.tags.some((t) => t.toLowerCase().includes(q))) ||
+        (dir.languages &&
+          dir.languages.some(
+            (l) => l.toLowerCase().includes(q) || (q === 'hindi' && l.toLowerCase() === 'hi')
+          )) ||
+        dir.plugins.some(
+          (p) =>
+            p.name.toLowerCase().includes(q) ||
+            p.languages?.some(
+              (l) => l.toLowerCase().includes(q) || (q === 'hindi' && l.toLowerCase() === 'hi')
+            )
+        )
     );
   }, [installedNuvioRepos, searchQuery]);
 
@@ -430,6 +472,112 @@ export const ExtensionsScreen: React.FC = () => {
     );
   }, [pureStremioAddons, searchQuery]);
 
+  const unifiedLiveSources = useMemo(
+    () => liveTvAddonService.buildUnifiedLiveSources(pureStremioAddons),
+    [pureStremioAddons]
+  );
+
+  const filteredLiveSources = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim();
+    if (!q) return unifiedLiveSources;
+    return unifiedLiveSources.filter(
+      (src) =>
+        src.name.toLowerCase().includes(q) ||
+        src.url.toLowerCase().includes(q) ||
+        (src.description || '').toLowerCase().includes(q)
+    );
+  }, [unifiedLiveSources, searchQuery]);
+
+  const directoryLiveStremioAddons = useMemo(() => {
+    const q = searchQuery.toLowerCase().trim();
+    const list = liveTvAddonService.getDirectoryLiveStremioAddons();
+    if (!q) return list;
+    return list.filter(
+      (item) =>
+        item.name.toLowerCase().includes(q) ||
+        item.description.toLowerCase().includes(q)
+    );
+  }, [searchQuery]);
+
+  const handleProbeSingleLive = async (source: UnifiedLiveSource) => {
+    setLiveProbeMap((prev) => ({
+      ...prev,
+      [source.key]: {
+        sourceKey: source.key,
+        status: 'checking',
+        detail: 'Probing...',
+        checkedAt: Date.now(),
+      },
+    }));
+    const result = await liveTvAddonService.probeLiveSource(source);
+    setLiveProbeMap((prev) => ({ ...prev, [source.key]: result }));
+  };
+
+  const handleProbeAllLive = async () => {
+    if (isProbingAllLive || unifiedLiveSources.length === 0) return;
+    setIsProbingAllLive(true);
+    setLiveProbeMap((prev) => {
+      const next = { ...prev };
+      for (const src of unifiedLiveSources) {
+        next[src.key] = {
+          sourceKey: src.key,
+          status: 'checking',
+          detail: 'Probing...',
+          checkedAt: Date.now(),
+        };
+      }
+      return next;
+    });
+    try {
+      const results = await liveTvAddonService.probeAllLiveSources(unifiedLiveSources, (res) => {
+        setLiveProbeMap((prev) => ({ ...prev, [res.sourceKey]: res }));
+      });
+      const vals = Object.values(results);
+      const online = vals.filter((r) => r.status === 'online').length;
+      const offline = vals.filter((r) => r.status === 'offline').length;
+      notify(`Probed ${vals.length} Live TV sources: ${online} online, ${offline} offline.`);
+    } finally {
+      setIsProbingAllLive(false);
+    }
+  };
+
+  const handleToggleLiveSource = (source: UnifiedLiveSource) => {
+    const nextEnabled = !source.enabled;
+    toggleStremioAddon(source.id, nextEnabled);
+    notify(`${nextEnabled ? 'Enabled' : 'Paused'} Live add-on "${source.name}".`);
+  };
+
+  const handleDeleteLiveSource = (source: UnifiedLiveSource) => {
+    if (source.isBuiltIn) return;
+    removeStremioAddon(source.id);
+    notify(`Removed Live TV add-on "${source.name}".`);
+  };
+
+  const handleAddLiveSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLiveFormError(null);
+    setIsAddingLiveSource(true);
+    try {
+      const res = await liveTvAddonService.addLiveSource({
+        name: liveSourceName,
+        input: liveSourceInput,
+        mode: 'stremio',
+      });
+      if (res.stremioAddons) {
+        const newest = res.stremioAddons[0];
+        if (newest) addStremioAddon(newest);
+      }
+      setLiveSourceName('');
+      setLiveSourceInput('');
+      setShowLiveAddForm(false);
+      notify(res.message);
+    } catch (err) {
+      setLiveFormError(err instanceof Error ? err.message : 'Unable to add Live TV source.');
+    } finally {
+      setIsAddingLiveSource(false);
+    }
+  };
+
   const isInsideDetail =
     (directoryTab === 'cloudstream' && Boolean(selectedRepo)) ||
     (directoryTab === 'nuvio' && Boolean(selectedNuvioRepo));
@@ -438,22 +586,27 @@ export const ExtensionsScreen: React.FC = () => {
     <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6 space-y-6">
       <TokenCreditStatusBadge />
       {/* Notifications */}
-      {successMsg && (
-        <motion.div
-          initial={{ opacity: 0, y: -10 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="p-3.5 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center justify-between"
-        >
-          <span>{successMsg}</span>
-          <button
-            type="button"
-            onClick={() => setSuccessMsg(null)}
-            className="text-emerald-400 font-bold ml-2"
+      <AnimatePresence>
+        {successMsg && (
+          <motion.div
+            key="extensions-success-msg"
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.2 }}
+            className="p-3.5 rounded-xl bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs font-medium flex items-center justify-between"
           >
-            ✕
-          </button>
-        </motion.div>
-      )}
+            <span>{successMsg}</span>
+            <button
+              type="button"
+              onClick={() => setSuccessMsg(null)}
+              className="text-emerald-400 font-bold ml-2"
+            >
+              ✕
+            </button>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
@@ -489,6 +642,8 @@ export const ExtensionsScreen: React.FC = () => {
                     ? 'cloudstreamrepo.com'
                     : directoryTab === 'nuvio'
                     ? 'nuvioplugin.com'
+                    : directoryTab === 'live'
+                    ? 'Stremio Live & Sports'
                     : 'stremio-addons.net'}
                 </span>
               )}
@@ -502,6 +657,8 @@ export const ExtensionsScreen: React.FC = () => {
                 ? `${repositories.length} CloudStream repos • ${totalProviders} plugins`
                 : directoryTab === 'nuvio'
                 ? `${combinedNuvioRepos.length} Nuvio repos • ${totalNuvioPluginCount} live scrapers (${installedNuvioRepos.filter((r) => r.enabled).length} active)`
+                : directoryTab === 'live'
+                ? `${unifiedLiveSources.filter((s) => s.enabled).length} active sources · ${directoryLiveStremioAddons.length} Live add-ons`
                 : `${pureStremioAddons.filter((a) => a.enabled).length} active installed • ${STREMIO_ADDONS_NET_DIRECTORY.length} catalog add-ons`}
             </p>
           </div>
@@ -606,7 +763,7 @@ export const ExtensionsScreen: React.FC = () => {
                 onClick={() => void handleCheckAllProviders()}
                 className="px-3 py-1 rounded-lg bg-red-500/20 hover:bg-red-500/35 text-white font-semibold transition-colors"
               >
-                Continue
+                Retry Check
               </button>
             </>
           ) : (
@@ -639,7 +796,7 @@ export const ExtensionsScreen: React.FC = () => {
             onClick={() => void handleCheckNuvioScrapers(selectedNuvioRepo.manifestUrl)}
             className="px-3 py-1 rounded-lg bg-red-500/25 hover:bg-red-500/40 text-white font-semibold"
           >
-            Continue
+            Retry
           </button>
         </div>
       )}
@@ -683,7 +840,7 @@ export const ExtensionsScreen: React.FC = () => {
               setDirectoryTab('stremio');
               setSearchQuery('');
             }}
-            className={`min-h-[40px] px-4 rounded-xl text-xs font-semibold inline-flex items-center gap-2 border transition-colors shrink-0 ${
+            className={`min-h-[44px] px-4 rounded-xl text-xs font-semibold inline-flex items-center gap-2 border transition-colors shrink-0 ${
               directoryTab === 'stremio'
                 ? 'bg-purple-600 text-white border-purple-500 shadow-md'
                 : 'bg-white/[0.04] text-slate-300 border-white/10 hover:bg-white/[0.08]'
@@ -691,6 +848,21 @@ export const ExtensionsScreen: React.FC = () => {
           >
             <Boxes className="h-3.5 w-3.5" />
             <span>Stremio Add-ons ({pureStremioAddons.length} Installed · {STREMIO_ADDONS_NET_DIRECTORY.length})</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setDirectoryTab('live');
+              setSearchQuery('');
+            }}
+            className={`min-h-[44px] px-4 rounded-xl text-xs font-semibold inline-flex items-center gap-2 border transition-colors shrink-0 ${
+              directoryTab === 'live'
+                ? 'bg-sky-600 text-white border-sky-500 shadow-md'
+                : 'bg-white/[0.04] text-slate-300 border-white/10 hover:bg-white/[0.08]'
+            }`}
+          >
+            <Tv className="h-3.5 w-3.5" />
+            <span>Live TV ({unifiedLiveSources.length})</span>
           </button>
         </div>
       )}
@@ -707,6 +879,8 @@ export const ExtensionsScreen: React.FC = () => {
               ? 'Search Nuvio repos or plugins (e.g. Yoru, 4KHDHub, UHDMovies, Spidey, MovieBox)...'
               : directoryTab === 'stremio'
               ? 'Search installed or 180+ Stremio add-ons (e.g. Torrentio, Peerflix, StremThru, USA TV)...'
+              : directoryTab === 'live'
+              ? 'Search M3U playlists or Live TV & Sports add-ons (e.g. Open Broadcast, USA TV, DaddyLive)...'
               : selectedRepo
               ? `Search within ${selectedRepo.name} (${selectedRepo.providers.length} plugins)...`
               : 'Search CloudStream repositories or plugins (e.g. Phisher, MultiMovies, HDhub4u)...'
@@ -721,7 +895,7 @@ export const ExtensionsScreen: React.FC = () => {
           {selectedRepo && (
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
               <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
-                {(['All', 'Series', 'Movies', 'Anime', 'Livestream', 'Others'] as const).map((cat) => (
+                {(['All', 'Hindi', 'Series', 'Movies', 'Anime', 'Livestream', 'Others'] as const).map((cat) => (
                   <button
                     key={cat}
                     type="button"
@@ -1211,6 +1385,279 @@ export const ExtensionsScreen: React.FC = () => {
                           disabled={installingAddonSlug === item.slug}
                           onClick={() => void handleInstallStremioFromDir(item)}
                           className="min-h-[36px] px-3.5 rounded-xl bg-purple-600 hover:bg-purple-500 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+                        >
+                          <Download className="h-3.5 w-3.5" />
+                          <span>{installingAddonSlug === item.slug ? 'Adding...' : 'Install'}</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* TAB 4: UNIFIED LIVE TV (STREMIO LIVE TV & SPORTS ADD-ONS) */}
+      {directoryTab === 'live' && (
+        <div className="space-y-5">
+          {/* Action Toolbar */}
+          <div className="rounded-2xl liquid-glass border border-white/[0.10] p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="space-y-0.5 min-w-0">
+              <h2 className="text-sm font-semibold text-white">Live TV &amp; Sports Sources</h2>
+              <p className="text-xs text-slate-400">
+                Manage Live TV Stremio add-ons and sports broadcast providers in one workspace
+              </p>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap shrink-0">
+              <button
+                type="button"
+                onClick={() => void handleProbeAllLive()}
+                disabled={isProbingAllLive || unifiedLiveSources.length === 0}
+                className="min-h-[44px] px-3.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 disabled:opacity-50 border border-emerald-500/35 text-emerald-200 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+              >
+                <Activity className="h-4 w-4" />
+                <span>{isProbingAllLive ? 'Probing Sources...' : 'Probe All Sources'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setLiveFormError(null);
+                  setShowLiveAddForm((v) => !v);
+                }}
+                className="min-h-[44px] px-4 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
+              >
+                <Plus className="h-4 w-4" />
+                <span>{showLiveAddForm ? 'Close Form' : 'Add Live Add-on'}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Inline Add Stremio Live Form */}
+          {showLiveAddForm && (
+            <form
+              onSubmit={handleAddLiveSubmit}
+              className="rounded-2xl liquid-glass border border-sky-500/30 p-4 sm:p-5 space-y-3.5"
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-white">
+                  Add Stremio Live TV Add-on
+                </h3>
+              </div>
+
+              <input
+                type="text"
+                value={liveSourceName}
+                onChange={(e) => setLiveSourceName(e.target.value)}
+                placeholder="Add-on name (optional, e.g. Live Sports)"
+                className="w-full min-h-[44px] px-3.5 rounded-xl bg-black/45 border border-white/[0.12] text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500"
+              />
+
+              <input
+                type="text"
+                value={liveSourceInput}
+                onChange={(e) => setLiveSourceInput(e.target.value)}
+                placeholder="Paste Stremio Live manifest.json or stremio:// URL"
+                className="w-full min-h-[44px] px-3.5 rounded-xl bg-black/45 border border-white/[0.12] text-sm text-white placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-sky-500 font-mono-tabular"
+              />
+
+              {liveFormError && (
+                <div className="rounded-xl bg-red-500/10 border border-red-500/30 px-3.5 py-2 text-xs text-red-300 flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 shrink-0" />
+                  <span>{liveFormError}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowLiveAddForm(false)}
+                  className="min-h-[44px] px-4 rounded-xl bg-white/5 hover:bg-white/10 text-xs font-medium text-slate-300 transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isAddingLiveSource}
+                  className="min-h-[44px] px-5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-xs font-semibold text-white inline-flex items-center gap-2 transition-colors"
+                >
+                  <Plus className="h-4 w-4" />
+                  <span>{isAddingLiveSource ? 'Validating...' : 'Save Live Source'}</span>
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* Installed Live Add-ons */}
+          <div className="space-y-2.5">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Installed Live TV Add-ons ({filteredLiveSources.length})
+            </h2>
+
+            {filteredLiveSources.length === 0 ? (
+              <div className="rounded-2xl liquid-glass p-10 text-center space-y-2">
+                <Tv className="h-8 w-8 text-slate-500 mx-auto" />
+                <p className="text-sm font-semibold text-white">No Live TV add-ons installed</p>
+                <p className="text-xs text-slate-400">
+                  Install a Live TV &amp; Sports Stremio add-on below.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-2.5">
+                {filteredLiveSources.map((src) => {
+                  const probe = liveProbeMap[src.key];
+                  const kindLabel = 'Stremio Live';
+                  const channelLabel =
+                    typeof (probe?.channelCount ?? src.channelCount) === 'number'
+                      ? `${probe?.channelCount ?? src.channelCount} channels`
+                      : src.version
+                      ? `v${src.version}`
+                      : '';
+                  const metaLine = [
+                    kindLabel,
+                    channelLabel,
+                    src.enabled ? 'Active' : 'Paused',
+                    probe && probe.status !== 'idle' ? probe.detail : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' · ');
+
+                  return (
+                    <div
+                      key={src.key}
+                      className="p-4 rounded-2xl liquid-glass border border-white/[0.10] flex flex-col sm:flex-row sm:items-center justify-between gap-3"
+                    >
+                      <div className="flex items-center gap-3.5 min-w-0">
+                        <div className="h-11 w-11 rounded-xl bg-sky-500/15 border border-sky-500/30 flex items-center justify-center shrink-0 overflow-hidden text-sky-300">
+                          {src.logo ? (
+                            <img
+                              src={src.logo}
+                              alt=""
+                              className="h-8 w-8 object-contain"
+                              loading="lazy"
+                            />
+                          ) : (
+                            <Tv className="h-5 w-5" />
+                          )}
+                        </div>
+                        <div className="min-w-0">
+                          <h3 className="text-sm font-semibold text-white truncate">
+                            {src.name}
+                          </h3>
+                          <p
+                            className={`text-xs mt-0.5 truncate ${
+                              probe?.status === 'online'
+                                ? 'text-emerald-300'
+                                : probe?.status === 'offline'
+                                ? 'text-red-300'
+                                : probe?.status === 'degraded'
+                                ? 'text-amber-300'
+                                : 'text-slate-400'
+                            }`}
+                          >
+                            {metaLine}
+                          </p>
+                          <p className="text-[11px] text-slate-500 truncate mt-0.5 font-mono-tabular">
+                            {src.description || src.url}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                        <button
+                          type="button"
+                          onClick={() => void handleProbeSingleLive(src)}
+                          disabled={probe?.status === 'checking'}
+                          className="min-h-[44px] px-3.5 rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/15 text-xs font-semibold text-slate-200 inline-flex items-center gap-1.5 transition-colors disabled:opacity-50"
+                        >
+                          <Activity className="h-3.5 w-3.5 text-sky-400" />
+                          <span>{probe?.status === 'checking' ? 'Probing...' : 'Probe'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleLiveSource(src)}
+                          className={`min-h-[44px] px-3.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
+                            src.enabled
+                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/35'
+                              : 'bg-white/5 text-slate-400 border-white/15'
+                          }`}
+                        >
+                          <Power className="h-3.5 w-3.5" />
+                          <span>{src.enabled ? 'Active' : 'Paused'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          disabled={src.isBuiltIn}
+                          onClick={() => handleDeleteLiveSource(src)}
+                          title={src.isBuiltIn ? 'Built-in channel list cannot be deleted' : `Remove ${src.name}`}
+                          aria-label={`Remove ${src.name}`}
+                          className="min-h-[44px] min-w-[44px] rounded-xl bg-white/5 hover:bg-red-500/20 disabled:opacity-35 disabled:hover:bg-white/5 text-slate-400 hover:text-red-300 flex items-center justify-center transition-colors"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* Recommended Live TV & Sports Stremio Add-ons */}
+          <div className="space-y-2.5">
+            <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+              Recommended Live TV &amp; Sports Add-ons ({directoryLiveStremioAddons.length})
+            </h2>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {directoryLiveStremioAddons.map((item) => {
+                const installed = installedByManifest.get(normalizeStremioUrlKey(item.manifestUrl));
+                return (
+                  <div
+                    key={`live-dir-${item.id}`}
+                    className="p-4 rounded-2xl liquid-glass border border-white/[0.10] flex items-center justify-between gap-3"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="h-11 w-11 rounded-xl bg-black/40 border border-white/[0.12] flex items-center justify-center shrink-0 overflow-hidden">
+                        {item.logo ? (
+                          <img
+                            src={item.logo}
+                            alt=""
+                            className="h-8 w-8 object-contain"
+                            loading="lazy"
+                          />
+                        ) : (
+                          <Tv className="h-5 w-5 text-sky-400" />
+                        )}
+                      </div>
+                      <div className="min-w-0">
+                        <h3 className="text-sm font-semibold text-white truncate">{item.name}</h3>
+                        <p className="text-xs text-slate-400 line-clamp-2 mt-0.5">
+                          {item.description}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      {installed ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleStremioAddon(installed.id, !installed.enabled)}
+                          className={`min-h-[44px] px-3.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 border transition-colors ${
+                            installed.enabled
+                              ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/35'
+                              : 'bg-white/5 text-slate-400 border-white/15'
+                          }`}
+                        >
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          <span>{installed.enabled ? 'Active' : 'Paused'}</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={installingAddonSlug === item.slug}
+                          onClick={() => void handleInstallStremioFromDir(item)}
+                          className="min-h-[44px] px-3.5 rounded-xl bg-sky-600 hover:bg-sky-500 disabled:opacity-60 text-white text-xs font-semibold inline-flex items-center gap-1.5 transition-colors"
                         >
                           <Download className="h-3.5 w-3.5" />
                           <span>{installingAddonSlug === item.slug ? 'Adding...' : 'Install'}</span>

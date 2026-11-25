@@ -1,0 +1,31 @@
+import type { CapacitorConfig } from '@capacitor/cli';
+
+const config: CapacitorConfig = {
+  appId: 'com.euthopiar.app',
+  appName: 'EUTHOPIAR',
+  webDir: 'dist',
+  backgroundColor: '#07090e',
+  android: {
+    allowMixedContent: true,
+    captureInput: true,
+    webContentsDebuggingEnabled: false,
+    backgroundColor: '#07090e',
+  },
+  plugins: {
+    SplashScreen: {
+      launchAutoHide: true,
+      launchShowDuration: 1200,
+      backgroundColor: '#07090e',
+      showSpinner: false,
+      androidSplashResourceName: 'splash',
+      androidScaleType: 'CENTER_CROP',
+    },
+    StatusBar: {
+      style: 'DARK',
+      backgroundColor: '#07090e',
+      overlaysWebView: false,
+    },
+  },
+};
+
+export default config;

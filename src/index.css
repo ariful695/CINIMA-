@@ -13,6 +13,8 @@
     font-family: var(--font-sans);
     color-scheme: dark;
     font-size: 13px;
+    overscroll-behavior-y: contain;
+    -webkit-tap-highlight-color: transparent;
   }
 
   @media (min-width: 640px) {
@@ -30,6 +32,8 @@
   body {
     background-color: #07090e;
     overflow-x: hidden;
+    overscroll-behavior-y: contain;
+    touch-action: manipulation;
   }
 }
 

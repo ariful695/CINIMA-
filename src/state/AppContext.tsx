@@ -6,18 +6,17 @@ import {
   StremioNetDirectoryAddon,
 } from '../data/nuvioAndStremioCatalog';
 import { cloudStreamRepoService } from '../services/cloudStreamRepoService';
-import { iptvOrgService } from '../services/iptvOrgService';
-import { m3uParserService } from '../services/m3uParserService';
+import { liveTvAddonService } from '../services/liveTvAddonService';
 import { InstalledNuvioRepo, nuvioService } from '../services/nuvioService';
 import { storageService } from '../services/storageService';
 import { stremioAddonService } from '../services/stremioAddonService';
-import { liveTvAddonService } from '../services/liveTvAddonService';
 import { offlineDownloadService } from '../services/offlineDownloadService';
+import { tmdbService } from '../services/tmdbService';
+import { streamProviderService } from '../services/streamProviderService';
 import {
   CloudStreamRepository,
   JsonStreamEndpoint,
   LiveChannel,
-  M3UPlaylistSource,
   MediaItem,
   MediaType,
   NavTab,
@@ -141,10 +140,6 @@ interface AppContextValue {
   providerHealthSummary: ProviderHealthSummary | null;
   checkAllProvidersHealth: (options?: { includeDirectory?: boolean; force?: boolean }) => Promise<ProviderHealthSummary | null>;
 
-  m3uPlaylists: M3UPlaylistSource[];
-  saveM3UPlaylists: (playlists: M3UPlaylistSource[]) => void;
-  iptvRegion: string;
-  setIptvRegion: (regionCode: string) => void;
   liveChannels: LiveChannel[];
   liveErrors: Record<string, string>;
   liveLoading: boolean;
@@ -157,6 +152,14 @@ interface AppContextValue {
   themeColor: ThemeColor;
   setThemeColor: (color: ThemeColor) => void;
   offlineDownloads: OfflineDownloadItem[];
+  cinematicIntroTarget: {
+    id: number;
+    title: string;
+    logoCandidates: string[];
+    posterPath?: string;
+    backdropPath?: string;
+  } | null;
+  cancelCinematicIntro: () => void;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
@@ -173,14 +176,71 @@ const ESSENTIAL_STREMIO_SLUGS = [
 ];
 
 export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const [activeTab, setActiveTab] = useState<NavTab>('home');
+  const [activeTab, setActiveTab] = useState<NavTab>(() => {
+    if (typeof window !== 'undefined') {
+      const param = new URLSearchParams(window.location.search).get('tab');
+      if (param === 'home' || param === 'search' || param === 'movies' || param === 'series' || param === 'live' || param === 'library') {
+        return param;
+      }
+    }
+    return 'home';
+  });
   const [librarySubTab, setLibrarySubTab] = useState<LibrarySubTab>('settings');
   const [selectedMedia, setSelectedMedia] = useState<SelectedMediaTarget | null>(null);
   const [playerSession, setPlayerSession] = useState<PlayerSession | null>(null);
   const [serverPickerTarget, setServerPickerTarget] = useState<ServerPickerTarget | null>(null);
+  const [cinematicIntroTarget, setCinematicIntroTarget] = useState<{
+    id: number;
+    title: string;
+    logoCandidates: string[];
+    posterPath?: string;
+    backdropPath?: string;
+  } | null>(null);
+
+  const introTimerRef = React.useRef<number | null>(null);
+  const introRunIdRef = React.useRef(0);
+
+  const cancelCinematicIntro = useCallback(() => {
+    introRunIdRef.current += 1;
+    if (introTimerRef.current !== null) {
+      window.clearTimeout(introTimerRef.current);
+      introTimerRef.current = null;
+    }
+    setCinematicIntroTarget(null);
+  }, []);
+
+  React.useEffect(() => {
+    return () => {
+      if (introTimerRef.current !== null) {
+        window.clearTimeout(introTimerRef.current);
+      }
+    };
+  }, []);
 
   const openServerPicker = useCallback((target: ServerPickerTarget) => {
+    introRunIdRef.current += 1;
+    if (introTimerRef.current !== null) {
+      window.clearTimeout(introTimerRef.current);
+      introTimerRef.current = null;
+    }
+    setCinematicIntroTarget(null);
     setServerPickerTarget(target);
+
+    streamProviderService.prefetchStreams({
+      tmdbId: target.mediaId,
+      imdbId: target.imdbId,
+      dejavuId: target.dejavuId,
+      archiveIdentifier: target.archiveIdentifier,
+      mediaType: target.mediaType,
+      title: target.title,
+      genreIds: target.genreIds,
+      seasonNumber: target.mediaType === 'tv' ? target.seasonNumber || 1 : undefined,
+      episodeNumber: target.mediaType === 'tv' ? target.episodeNumber || 1 : undefined,
+      originalLanguage: target.originalLanguage,
+      releaseYear: target.releaseYear,
+      bengaliSerialSlug: target.bengaliSerialSlug,
+      preferredVideoId: target.preferredVideoId,
+    });
   }, []);
 
   const closeServerPicker = useCallback(() => {
@@ -219,25 +279,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const saveStremioAddons = useCallback((addons: StremioAddonConfig[]) => {
     storageService.saveStremioAddons(addons);
     setStremioAddons(storageService.getStremioAddons());
-    void nuvioService.clearServerCache();
+    streamProviderService.clearCache();
   }, []);
 
   const addStremioAddon = useCallback((addon: StremioAddonConfig) => {
     const updated = storageService.addStremioAddon(addon);
     setStremioAddons(updated);
-    void nuvioService.clearServerCache();
+    streamProviderService.clearCache();
   }, []);
 
   const removeStremioAddon = useCallback((id: string) => {
     const updated = storageService.removeStremioAddon(id);
     setStremioAddons(updated);
-    void nuvioService.clearServerCache();
+    streamProviderService.clearCache();
   }, []);
 
   const toggleStremioAddon = useCallback((id: string, enabled: boolean) => {
     const updated = storageService.toggleStremioAddon(id, enabled);
     setStremioAddons(updated);
-    void nuvioService.clearServerCache();
+    streamProviderService.clearCache();
   }, []);
 
   const installStremioDirectoryItem = useCallback(
@@ -291,6 +351,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     (repo: NuvioDirectoryRepo, enabled = true): InstalledNuvioRepo[] => {
       const updated = nuvioService.installDirectoryRepo(repo, enabled);
       setNuvioRepos(updated);
+      streamProviderService.clearCache();
       return updated;
     },
     []
@@ -299,56 +360,66 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const installCustomNuvioRepo = useCallback(async (url: string): Promise<InstalledNuvioRepo> => {
     const added = await nuvioService.installCustomRepoUrl(url);
     setNuvioRepos(nuvioService.getInstalledRepos());
+    streamProviderService.clearCache();
     return added;
   }, []);
 
   const installAllNuvioRepos = useCallback((): InstalledNuvioRepo[] => {
     const all = nuvioService.installAllDirectoryRepos();
     setNuvioRepos(all);
+    streamProviderService.clearCache();
     return all;
   }, []);
 
   const toggleNuvioRepo = useCallback((repoId: string, enabled: boolean) => {
     const updated = nuvioService.toggleRepoEnabled(repoId, enabled);
     setNuvioRepos(updated);
+    streamProviderService.clearCache();
   }, []);
 
   const removeNuvioRepo = useCallback((repoId: string) => {
     const updated = nuvioService.removeRepo(repoId);
     setNuvioRepos(updated);
+    streamProviderService.clearCache();
   }, []);
 
   // CloudStream actions
   const addCloudStreamRepo = useCallback(async (urlOrShortcode: string): Promise<CloudStreamRepository> => {
     const added = await cloudStreamRepoService.addRepository(urlOrShortcode);
     setCloudStreamRepos(cloudStreamRepoService.getRepositories());
+    streamProviderService.clearCache();
     return added;
   }, []);
 
   const installAllCloudStreamRepos = useCallback(async (): Promise<CloudStreamRepository[]> => {
     const all = await cloudStreamRepoService.installAllDirectoryRepos();
     setCloudStreamRepos(cloudStreamRepoService.getRepositories());
+    streamProviderService.clearCache();
     return all;
   }, []);
 
   const removeCloudStreamRepo = useCallback((repoId: string) => {
     cloudStreamRepoService.removeRepository(repoId);
     setCloudStreamRepos(cloudStreamRepoService.getRepositories());
+    streamProviderService.clearCache();
   }, []);
 
   const toggleCloudStreamProvider = useCallback((repoId: string, providerId: string) => {
     cloudStreamRepoService.toggleProviderDownload(repoId, providerId);
     setCloudStreamRepos(cloudStreamRepoService.getRepositories());
+    streamProviderService.clearCache();
   }, []);
 
   const downloadAllInCloudStreamRepo = useCallback((repoId: string) => {
     cloudStreamRepoService.downloadAllInRepo(repoId);
     setCloudStreamRepos(cloudStreamRepoService.getRepositories());
+    streamProviderService.clearCache();
   }, []);
 
   const removeAllInCloudStreamRepo = useCallback((repoId: string) => {
     cloudStreamRepoService.removeAllInRepo(repoId);
     setCloudStreamRepos(cloudStreamRepoService.getRepositories());
+    streamProviderService.clearCache();
   }, []);
 
   // Smart auto-detecting installer for Nuvio, Stremio, and CloudStream URLs / shortcodes
@@ -536,6 +607,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       setNuvioRepos(refreshedNuvio);
       setStremioAddons(refreshedStremio);
       setCloudStreamRepos(refreshedCloudStream);
+      streamProviderService.clearCache();
+      setCatalogRefreshTick((t) => t + 1);
       return {
         nuvioCount: refreshedNuvio.length,
         stremioCount: refreshedStremio.length,
@@ -546,12 +619,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
-  const [m3uPlaylists, setM3UPlaylists] = useState<M3UPlaylistSource[]>(() =>
-    storageService.getM3UPlaylists()
-  );
-  const [iptvRegion, setIptvRegionState] = useState<string>(() =>
-    storageService.getIptvRegion()
-  );
   const [favoriteChannelIds, setFavoriteChannelIds] = useState<string[]>(() => {
     try {
       const raw = localStorage.getItem('kinostream_favorite_channels');
@@ -574,8 +641,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return offlineDownloadService.subscribe(setOfflineDownloads);
   }, []);
 
+  const healthCheckRunIdRef = React.useRef(0);
+
   const checkAllProvidersHealth = useCallback(
     async (options?: { includeDirectory?: boolean; force?: boolean }): Promise<ProviderHealthSummary | null> => {
+      if (isCheckingProviders && !options?.force) {
+        return null;
+      }
+      const runId = ++healthCheckRunIdRef.current;
       setIsCheckingProviders(true);
       setProviderCheckError(null);
 
@@ -601,6 +674,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         { key: 'core:cloudstream', url: 'https://raw.githubusercontent.com/phisher98/cloudstream-extensions-phisher/refs/heads/builds/repo.json', name: 'CloudStream Plugins' },
         { key: 'core:cinemeta', url: 'https://v3-cinemeta.strem.io/manifest.json', name: 'Cinemeta Catalog' },
         { key: 'core:opensubtitles', url: 'https://opensubtitles-v3.strem.io/manifest.json', name: 'OpenSubtitles v3' },
+        { key: 'core:bengali_serials', url: '/api/bengali/catalog', name: 'Zee Bangla & Bengali Serials' },
+        { key: 'core:plaviohd', url: 'https://hd.plavio.site/manifest.json', name: 'PlavioHD' },
       ];
       for (const cp of coreProviders) {
         targets.push({ key: cp.key, kind: 'core', url: cp.url, name: cp.name });
@@ -654,6 +729,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       }
 
+      const previousSnapshot = { ...providerHealthMap };
+
       // Mark all targets checking in UI immediately
       setProviderHealthMap((prev) => {
         const next = { ...prev };
@@ -665,11 +742,22 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
       try {
         const res = await nuvioService.checkAllProvidersHealth(targets, (chunkResults) => {
+          if (healthCheckRunIdRef.current !== runId) return;
           setProviderHealthMap((prev) => ({
             ...prev,
             ...chunkResults,
           }));
         });
+        if (healthCheckRunIdRef.current !== runId) return null;
+
+        if (res.transportFailed && res.summary.online === 0 && res.summary.degraded === 0) {
+          setProviderCheckError(
+            res.errorMessage || 'Health check service could not be reached. Please retry in a moment.'
+          );
+          setProviderHealthMap(previousSnapshot);
+          return null;
+        }
+
         setProviderHealthMap((prev) => {
           const next = { ...prev };
           for (const [k, v] of Object.entries(res.results)) {
@@ -687,23 +775,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setProviderHealthSummary(summary);
         return summary;
       } catch (err) {
+        if (healthCheckRunIdRef.current !== runId) return null;
         const msg = err instanceof Error ? err.message : 'Unable to complete provider health check.';
         setProviderCheckError(msg);
-        setProviderHealthMap((prev) => {
-          const next = { ...prev };
-          for (const t of targets) {
-            if (next[t.key]?.status === 'checking') {
-              next[t.key] = { status: 'offline', detail: 'Check failed' };
-            }
-          }
-          return next;
-        });
+        setProviderHealthMap(previousSnapshot);
         return null;
       } finally {
-        setIsCheckingProviders(false);
+        if (healthCheckRunIdRef.current === runId) {
+          setIsCheckingProviders(false);
+        }
       }
     },
-    [nuvioRepos, stremioAddons, cloudStreamRepos]
+    [nuvioRepos, stremioAddons, cloudStreamRepos, isCheckingProviders, providerHealthMap]
   );
 
   const setThemeColor = useCallback((color: ThemeColor) => {
@@ -721,70 +804,43 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setChannelHealthMap((prev) => ({ ...prev, ...batch }));
   }, []);
 
-  const loadLiveChannels = useCallback(
-    async (
-      playlistsToLoad: M3UPlaylistSource[],
-      regionCode: string,
-      forceRefresh = false
-    ) => {
-      setLiveLoading(true);
-      const [localRes, iptvRes, addonRes] = await Promise.all([
-        m3uParserService.loadAllEnabledPlaylists(playlistsToLoad),
-        iptvOrgService.fetchRegionChannels(regionCode, forceRefresh),
-        liveTvAddonService
-          .fetchAllAddonChannels(stremioAddons)
-          .catch((err) => ({
-            channels: [] as LiveChannel[],
-            errors: { 'live-tv-addons': err instanceof Error ? err.message : 'Addon fetch error' } as Record<string, string>,
-          })),
-      ]);
+  const loadLiveChannels = useCallback(async (addonsToLoad: StremioAddonConfig[]) => {
+    setLiveLoading(true);
+    const res = await liveTvAddonService.loadChannelsFromBuiltInAndStremio(addonsToLoad);
 
-      const mergedErrors = { ...localRes.errors, ...addonRes.errors };
-      if (iptvRes.error) {
-        mergedErrors['iptv-org'] = iptvRes.error;
+    const seenCompositeKeys = new Set<string>();
+    const combined: LiveChannel[] = [];
+    for (const ch of res.channels) {
+      const compositeKey = `${(ch.name || '').toLowerCase().trim()}::${(ch.streamUrl || '').trim()}`;
+      if (!seenCompositeKeys.has(compositeKey)) {
+        seenCompositeKeys.add(compositeKey);
+        combined.push(ch);
       }
+    }
 
-      const seenCompositeKeys = new Set<string>();
-      const combined: LiveChannel[] = [];
-      for (const ch of [...localRes.channels, ...iptvRes.channels, ...addonRes.channels]) {
-        const compositeKey = `${(ch.name || '').toLowerCase().trim()}::${(ch.streamUrl || '').trim()}`;
-        if (!seenCompositeKeys.has(compositeKey)) {
-          seenCompositeKeys.add(compositeKey);
-          combined.push(ch);
-        }
-      }
-
-      setLiveChannels(combined);
-      setLiveErrors(mergedErrors);
-      setLiveLoadedOnce(true);
-      setLiveLoading(false);
-    },
-    [stremioAddons]
-  );
+    setLiveChannels(combined);
+    setLiveErrors(res.errors);
+    setLiveLoadedOnce(true);
+    setLiveLoading(false);
+  }, []);
 
   useEffect(() => {
     // Load immediately when user visits Live TV, or defer slightly during idle so Home screen renders with zero stutter
     if (activeTab === 'live' || liveLoadedOnce) {
-      void loadLiveChannels(m3uPlaylists, iptvRegion, false);
+      void loadLiveChannels(stremioAddons);
       return;
     }
     const timer = window.setTimeout(() => {
-      void loadLiveChannels(m3uPlaylists, iptvRegion, false);
+      void loadLiveChannels(stremioAddons);
     }, 1800);
     return () => window.clearTimeout(timer);
-  }, [activeTab, liveLoadedOnce, m3uPlaylists, iptvRegion, loadLiveChannels]);
-
-  const setIptvRegion = useCallback((regionCode: string) => {
-    storageService.setIptvRegion(regionCode);
-    setIptvRegionState(regionCode);
-  }, []);
+  }, [activeTab, liveLoadedOnce, stremioAddons, loadLiveChannels]);
 
   const refreshLiveChannels = useCallback(
-    async (forceRefresh = true) => {
-      if (forceRefresh) iptvOrgService.clearCache();
-      await loadLiveChannels(storageService.getM3UPlaylists(), iptvRegion, forceRefresh);
+    async (_forceRefresh = true) => {
+      await loadLiveChannels(storageService.getStremioAddons());
     },
-    [iptvRegion, loadLiveChannels]
+    [loadLiveChannels]
   );
 
   const openLibrarySection = useCallback((subTab: LibrarySubTab) => {
@@ -878,11 +934,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setJsonEndpoints(endpoints);
   }, []);
 
-  const saveM3UPlaylists = useCallback((playlists: M3UPlaylistSource[]) => {
-    storageService.saveM3UPlaylists(playlists);
-    setM3UPlaylists(playlists);
-  }, []);
-
   const contextValue = useMemo<AppContextValue>(
     () => ({
       activeTab,
@@ -942,10 +993,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       providerCheckError,
       providerHealthSummary,
       checkAllProvidersHealth,
-      m3uPlaylists,
-      saveM3UPlaylists,
-      iptvRegion,
-      setIptvRegion,
       liveChannels,
       liveErrors,
       liveLoading,
@@ -958,6 +1005,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       themeColor,
       setThemeColor,
       offlineDownloads,
+      cinematicIntroTarget,
+      cancelCinematicIntro,
     }),
     [
       activeTab,
@@ -1015,10 +1064,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       providerCheckError,
       providerHealthSummary,
       checkAllProvidersHealth,
-      m3uPlaylists,
-      saveM3UPlaylists,
-      iptvRegion,
-      setIptvRegion,
       liveChannels,
       liveErrors,
       liveLoading,
@@ -1031,6 +1076,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       themeColor,
       setThemeColor,
       offlineDownloads,
+      cinematicIntroTarget,
+      cancelCinematicIntro,
     ]
   );
 

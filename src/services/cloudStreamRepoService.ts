@@ -64,7 +64,73 @@ function inferPluginLanguage(
   const name = pluginName.toLowerCase();
   const tags = (repoTags || []).map((t) => t.toLowerCase());
 
-  if (tags.includes('hindi') || name.includes('hindi') || name.includes('desi') || name.includes('bolly')) {
+  if (
+    tags.includes('hindi') ||
+    tags.includes('bollywood') ||
+    tags.includes('desi') ||
+    tags.includes('indian') ||
+    name.includes('hindi') ||
+    name.includes('desi') ||
+    name.includes('bolly') ||
+    name.includes('hdhub') ||
+    name.includes('multimovies') ||
+    name.includes('hindmovie') ||
+    name.includes('hdmovie2') ||
+    name.includes('moviesmod') ||
+    name.includes('4khdhub') ||
+    name.includes('fourkhdhub') ||
+    name.includes('fourkhd') ||
+    name.includes('filmy') ||
+    name.includes('movierulz') ||
+    name.includes('movies4u') ||
+    name.includes('allmovieland') ||
+    name.includes('moviebox') ||
+    name.includes('dudefilms') ||
+    name.includes('vegamovies') ||
+    name.includes('katmovie') ||
+    name.includes('netmirror') ||
+    name.includes('mkvcinemas') ||
+    name.includes('uwatchfree') ||
+    name.includes('9kmovies') ||
+    name.includes('themoviesflix') ||
+    name.includes('cinestream') ||
+    name.includes('moviesdrive') ||
+    name.includes('zinkmovies') ||
+    name.includes('xdmovies') ||
+    name.includes('toonhub') ||
+    name.includes('toonstream') ||
+    name.includes('animesalt') ||
+    name.includes('animedekho') ||
+    name.includes('animeworld') ||
+    name.includes('doflix') ||
+    name.includes('dooflix') ||
+    name.includes('castle') ||
+    name.includes('cricify') ||
+    name.includes('pikashow') ||
+    name.includes('streamflix') ||
+    name.includes('mp4moviez') ||
+    name.includes('fullymaza') ||
+    name.includes('movipk') ||
+    name.includes('watchmoviespk') ||
+    name.includes('onlinemovieshindi') ||
+    name.includes('moviezwap') ||
+    name.includes('fibwatch') ||
+    name.includes('cinemacity') ||
+    name.includes('movieblast') ||
+    name.includes('topcartoons') ||
+    name.includes('uhdmovies') ||
+    name.includes('istreamflare') ||
+    name.includes('ringz') ||
+    name.includes('dorabash') ||
+    name.includes('xon') ||
+    name.includes('desiserials') ||
+    name.includes('cinevood') ||
+    name.includes('einthusan') ||
+    name.includes('desicinemas') ||
+    name.includes('filmycab') ||
+    name.includes('filmyfiy') ||
+    name.includes('fivemovierulz')
+  ) {
     return 'Hindi';
   }
   if (tags.includes('bengali') || name.includes('bengali') || name.includes('bangla')) {
@@ -111,6 +177,7 @@ function convertRawToRepository(
   downloadAll = false
 ): CloudStreamRepository {
   const providers: CloudStreamProviderItem[] = raw.plugins.map((p, idx) => {
+    const lang = inferPluginLanguage(p.name, raw.tags);
     const isTopFeatured =
       p.featured ||
       [
@@ -118,7 +185,20 @@ function convertRawToRepository(
         'superstream',
         'streamplay',
         'hdhub4u',
+        'fourkhdhub',
+        '4khdhub',
+        'hindmoviez',
         'desicinemas',
+        'moviesmod',
+        'allmovieland',
+        'moviebox',
+        'filmyfiy',
+        'movies4u',
+        'netmirror',
+        'vegamovies',
+        'bollyflix',
+        'moviesdrive',
+        'cinestream',
         'yts',
         'animedekho',
         'animepahe',
@@ -129,7 +209,7 @@ function convertRawToRepository(
         'showbox',
       ].includes(p.name.toLowerCase());
 
-    const isDownloaded = downloadAll || Boolean(isTopFeatured);
+    const isDownloaded = downloadAll || Boolean(isTopFeatured) || lang === 'Hindi';
 
     return {
       id: `${raw.id}-${idx}-${p.name.toLowerCase().replace(/[^a-z0-9]/g, '')}`,
@@ -139,7 +219,7 @@ function convertRawToRepository(
       size: '—',
       description: `Watch content from ${p.name} on CloudStream`,
       downloaded: isDownloaded,
-      lang: inferPluginLanguage(p.name, raw.tags),
+      lang,
     };
   });
 
@@ -150,6 +230,7 @@ function convertRawToRepository(
     description: raw.description || `CloudStream extension repository (${raw.plugins.length} plugins)`,
     author: raw.badge || 'CloudStream Community',
     icon: raw.icon || '☁️',
+    tags: raw.tags,
     downloadedCount: providers.filter((p) => p.downloaded).length,
     totalCount: providers.length,
     providers,
@@ -276,9 +357,9 @@ export function deduplicateCloudStreamRepos(repos: CloudStreamRepository[]): Clo
   return result;
 }
 
-// Generate the initial default repositories (Top 6 popular repositories from cloudstreamrepo.com)
+// Generate the initial default repositories (Popular + Hindi repositories from cloudstreamrepo.com)
 export function getInitialDefaultRepositories(): CloudStreamRepository[] {
-  const defaultIds = ['cspr', 'phisher', 'megix', 'mega', 'dogior', 'cskarma'];
+  const defaultIds = ['phisher', 'megix', 'cncverse', 'netmirror', 'redowan', 'cspr', 'mega', 'dogior', 'cskarma'];
   return deduplicateCloudStreamRepos(
     CLOUDSTREAM_DIRECTORY_REPOS.filter((r) => defaultIds.includes(r.id)).map((r) =>
       convertRawToRepository(r, false)
@@ -288,6 +369,7 @@ export function getInitialDefaultRepositories(): CloudStreamRepository[] {
 
 export const cloudStreamRepoService = {
   getRepositories(): CloudStreamRepository[] {
+    const hindiMigrationKey = 'kinostream_cs_hindi_migrated_v3';
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       if (stored) {
@@ -295,14 +377,39 @@ export const cloudStreamRepoService = {
         if (Array.isArray(parsed) && parsed.length > 0) {
           let changed = false;
           const byId = new Map(CLOUDSTREAM_DIRECTORY_REPOS.map((r) => [r.id, r]));
-          const migratedRaw = parsed.map((repo) => {
+          let migratedRaw = parsed.map((repo) => {
             const dirMatch = byId.get(repo.id);
+            let nextRepo = repo;
             if (dirMatch && dirMatch.directInstall && repo.url !== dirMatch.directInstall) {
               changed = true;
-              return { ...repo, url: dirMatch.directInstall };
+              nextRepo = { ...nextRepo, url: dirMatch.directInstall };
             }
-            return repo;
+            const nextProviders = (nextRepo.providers || []).map((prov) => {
+              const inferred = inferPluginLanguage(prov.name, dirMatch?.tags);
+              if (inferred === 'Hindi') {
+                if (prov.lang !== 'Hindi' || !prov.downloaded) {
+                  changed = true;
+                  return { ...prov, lang: 'Hindi', downloaded: true };
+                }
+              }
+              return prov;
+            });
+            return { ...nextRepo, providers: nextProviders };
           });
+
+          if (localStorage.getItem(hindiMigrationKey) !== '1') {
+            localStorage.setItem(hindiMigrationKey, '1');
+            const existingIds = new Set(migratedRaw.map((r) => r.id.toLowerCase()));
+            for (const reqId of ['redowan', 'cncverse', 'netmirror', 'megix', 'phisher']) {
+              const dirRepo = byId.get(reqId);
+              if (dirRepo && !existingIds.has(dirRepo.id.toLowerCase())) {
+                migratedRaw = [convertRawToRepository(dirRepo, false), ...migratedRaw];
+                existingIds.add(dirRepo.id.toLowerCase());
+                changed = true;
+              }
+            }
+          }
+
           const deduplicated = deduplicateCloudStreamRepos(migratedRaw);
           if (deduplicated.length !== parsed.length) {
             changed = true;
@@ -312,6 +419,7 @@ export const cloudStreamRepoService = {
         }
       }
     } catch {}
+    localStorage.setItem(hindiMigrationKey, '1');
     const defaults = getInitialDefaultRepositories();
     this.saveRepositories(defaults);
     return defaults;

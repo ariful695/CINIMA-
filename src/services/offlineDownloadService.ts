@@ -990,8 +990,9 @@ class OfflineDownloadService {
     signal: AbortSignal
   ): Promise<OfflineDownloadItem> {
     const fetchUrl = buildFetchableStreamUrl(item.sourceUrl, false);
-    let resumeOffset = item.bytesDownloaded > 0 && item.completedUnits > 0 ? item.bytesDownloaded : 0;
-    let nextChunkIndex = item.completedUnits > 0 && resumeOffset > 0 ? item.completedUnits : 0;
+    const alignedCompleted = Math.max(0, item.completedUnits || 0);
+    let resumeOffset = alignedCompleted * MP4_CHUNK_BYTES;
+    let nextChunkIndex = alignedCompleted;
 
     const headers: Record<string, string> = {};
     if (resumeOffset > 0) {

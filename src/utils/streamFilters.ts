@@ -9,7 +9,7 @@ export function extractLanguageTags(audioLanguage?: string): string[] {
   const lower = raw.toLowerCase();
   const tags: string[] = [];
 
-  if (/\b(hindi|hin)\b/.test(lower)) tags.push('Hindi');
+  if (/\b(hindi|hin|hi|bolly|bollywood|hindustani)\b|\[hin(?:di)?\]|\(hin(?:di)?\)|hin[\s._+-]+eng|eng[\s._+-]+hin|🇮🇳/i.test(lower)) tags.push('Hindi');
   if (/\b(bengali|bangla|ben)\b/.test(lower)) tags.push('Bengali');
   if (/\b(tamil|tam)\b/.test(lower)) tags.push('Tamil');
   if (/\b(telugu|tel)\b/.test(lower)) tags.push('Telugu');

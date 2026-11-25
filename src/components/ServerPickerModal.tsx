@@ -1,12 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
-  Boxes,
   CheckCircle2,
-  Download,
   Film,
   Filter,
-  HardDrive,
-  Info,
   Languages,
   Loader2,
   Play,
@@ -15,10 +11,13 @@ import {
   Server,
   ShieldCheck,
   Tv,
+  Volume2,
   X,
   Youtube,
+  Zap,
 } from 'lucide-react';
 import { motion } from 'motion/react';
+import { bengaliSerialService } from '../services/bengaliSerialService';
 import { streamProviderService } from '../services/streamProviderService';
 import { useAppState } from '../state/AppContext';
 import { StreamSource, SubtitleTrack, THEME_ACCENTS } from '../types/media';
@@ -27,8 +26,6 @@ import { MediaPosterImage } from './MediaPosterImage';
 import {
   extractLanguageTags,
   getAvailableLanguages,
-  getAvailableProviders,
-  getCanonicalProviderName,
   getSourceFlags,
   matchesQualityFilter,
   matchesSourceTypeFilter,
@@ -54,15 +51,12 @@ function scoreServerChoice(source: StreamSource, targetTitle: string, preferredL
 
   if (source.isVerified) score += 500;
   if (source.isDirectPlayable !== false && !isP2P) score += 300;
-  
-  // Prioritize servers with valid HLS stream headers/format to prevent incorrect language playback
   if (isHls) score += 200;
 
   if (isRemux) score -= 220;
   if (source.isDirectPlayable === false) score -= 350;
   if (isP2P) score -= 120;
 
-  // Language metadata matching (e.g. user-preferred 'Hindi' tags)
   if (preferredLanguage && preferredLanguage !== 'All') {
     const tags = extractLanguageTags(source.audioLanguage);
     if (tags.includes(preferredLanguage)) {
@@ -72,7 +66,6 @@ function scoreServerChoice(source: StreamSource, targetTitle: string, preferredL
     }
   }
 
-  // Title relevance boost
   const cleanTargetWords = targetTitle
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
@@ -83,10 +76,8 @@ function scoreServerChoice(source: StreamSource, targetTitle: string, preferredL
     score += 120;
   }
 
-  // Stream resolution / Quality ranking bonus
   score += getQualityRank(source.quality) * 40;
 
-  // Seeders bonus for P2P
   if (source.seeders && source.seeders > 0) {
     score += Math.min(60, Math.round(source.seeders / 8));
   }
@@ -112,7 +103,6 @@ export const ServerPickerModal: React.FC = () => {
   // Server Filtering Controls
   const [verifiedOnly, setVerifiedOnly] = useState<boolean>(false);
   const [selectedLanguage, setSelectedLanguage] = useState<string>('All');
-  const [selectedProvider, setSelectedProvider] = useState<string>('All');
   const [sourceTypeFilter, setSourceTypeFilter] = useState<SourceTypeFilter>('all');
   const [qualityFilter, setQualityFilter] = useState<QualityFilter>('all');
   const [sortBy, setSortBy] = useState<SortMode>('recommended');
@@ -123,7 +113,6 @@ export const ServerPickerModal: React.FC = () => {
   const resetFilters = () => {
     setVerifiedOnly(false);
     setSelectedLanguage('All');
-    setSelectedProvider('All');
     setSourceTypeFilter('all');
     setQualityFilter('all');
     setSortBy('recommended');
@@ -147,70 +136,80 @@ export const ServerPickerModal: React.FC = () => {
     setLoading(true);
     setIsSearchingMore(true);
 
-    const resolve = async () => {
-      try {
-        const query = {
-          tmdbId: serverPickerTarget.mediaId,
-          imdbId: serverPickerTarget.imdbId,
-          dejavuId: serverPickerTarget.dejavuId,
-          archiveIdentifier: serverPickerTarget.archiveIdentifier,
-          mediaType: serverPickerTarget.mediaType,
-          title: serverPickerTarget.title,
-          genreIds: serverPickerTarget.genreIds,
-          originalLanguage: serverPickerTarget.originalLanguage,
-          releaseYear: serverPickerTarget.releaseYear,
-          seasonNumber: serverPickerTarget.seasonNumber,
-          episodeNumber: serverPickerTarget.episodeNumber,
-          episodeTitle: serverPickerTarget.episodeTitle,
-          bengaliSerialSlug: serverPickerTarget.bengaliSerialSlug,
-          preferredVideoId: serverPickerTarget.preferredVideoId,
-        };
+    if (retryTick > 0) {
+      streamProviderService.clearCache();
+    }
 
-        const handleProgress = (partial: { sources?: StreamSource[]; subtitles?: SubtitleTrack[] }) => {
-          if (!active) return;
-          const partialSources = partial.sources || [];
-          if (partialSources.length > 0) {
-            setSources(partialSources);
-            setSubtitles(partial.subtitles || []);
-            setVerifiedOnly(false);
-            setLoading(false);
-          }
-        };
+    const query = {
+      tmdbId: serverPickerTarget.mediaId,
+      imdbId: serverPickerTarget.imdbId,
+      dejavuId: serverPickerTarget.dejavuId,
+      archiveIdentifier: serverPickerTarget.archiveIdentifier,
+      mediaType: serverPickerTarget.mediaType,
+      title: serverPickerTarget.title,
+      genreIds: serverPickerTarget.genreIds,
+      originalLanguage: serverPickerTarget.originalLanguage,
+      releaseYear: serverPickerTarget.releaseYear,
+      seasonNumber: serverPickerTarget.seasonNumber,
+      episodeNumber: serverPickerTarget.episodeNumber,
+      episodeTitle: serverPickerTarget.episodeTitle,
+      bengaliSerialSlug: serverPickerTarget.bengaliSerialSlug,
+      preferredVideoId: serverPickerTarget.preferredVideoId,
+    };
 
-        const res =
-          serverPickerTarget.mediaType === 'tv'
-            ? await streamProviderService.resolveEpisodeStreams(query, { onProgress: handleProgress })
-            : await streamProviderService.resolveMovieStreams(query, { onProgress: handleProgress });
-
+    const unsubscribe = streamProviderService.subscribeAndResolveStreams(
+      query,
+      (partial, isDone) => {
         if (!active) return;
-        const loadedSources = res.sources || [];
-        setSources(loadedSources);
-        setSubtitles(res.subtitles || []);
-        setVerifiedOnly(false);
-      } catch (err) {
-        if (!active) return;
-        setResolveError(err instanceof Error ? err.message : 'Unable to probe stream servers.');
-      } finally {
-        if (active) {
+        const partialSources = partial.sources || [];
+        if (partialSources.length > 0) {
+          setSources(partialSources);
+          setSubtitles(partial.subtitles || []);
+          setVerifiedOnly(false);
+          setLoading(false);
+        } else if (isDone) {
+          setSources([]);
+          setSubtitles(partial.subtitles || []);
+        }
+        if (isDone) {
           setLoading(false);
           setIsSearchingMore(false);
         }
       }
-    };
+    );
 
-    void resolve();
     return () => {
       active = false;
+      unsubscribe();
     };
   }, [serverPickerTarget, retryTick]);
 
+  const isBengaliTarget = useMemo(() => {
+    if (!serverPickerTarget) return false;
+    return (
+      bengaliSerialService.isBengaliSerialOrCartoon({
+        title: serverPickerTarget.title,
+        originalLanguage: serverPickerTarget.originalLanguage,
+        bengaliSerialSlug: serverPickerTarget.bengaliSerialSlug,
+      }) || (serverPickerTarget.mediaId >= 895000 && serverPickerTarget.mediaId <= 899999)
+    );
+  }, [serverPickerTarget]);
+
   const fullMovieSources = useMemo(
-    () => sources.filter((s) => s.format !== 'youtube' || Boolean(s.isFullEpisode)),
-    [sources]
+    () =>
+      sources.filter((s) =>
+        isBengaliTarget
+          ? s.format !== 'youtube'
+          : s.format !== 'youtube' || Boolean(s.isFullEpisode)
+      ),
+    [sources, isBengaliTarget]
   );
   const trailerSources = useMemo(
-    () => sources.filter((s) => s.format === 'youtube' && !s.isFullEpisode),
-    [sources]
+    () =>
+      isBengaliTarget
+        ? []
+        : sources.filter((s) => s.format === 'youtube' && !s.isFullEpisode),
+    [sources, isBengaliTarget]
   );
 
   const verifiedDirectCount = useMemo(
@@ -226,11 +225,6 @@ export const ServerPickerModal: React.FC = () => {
 
   const availableLanguages = useMemo(
     () => getAvailableLanguages(fullMovieSources),
-    [fullMovieSources]
-  );
-
-  const availableProviders = useMemo(
-    () => getAvailableProviders(fullMovieSources),
     [fullMovieSources]
   );
 
@@ -274,10 +268,6 @@ export const ServerPickerModal: React.FC = () => {
           if (!tags.includes(selectedLanguage)) return false;
         }
 
-        if (selectedProvider !== 'All') {
-          if (getCanonicalProviderName(s) !== selectedProvider) return false;
-        }
-
         if (!matchesSourceTypeFilter(s, sourceTypeFilter)) {
           return false;
         }
@@ -287,7 +277,7 @@ export const ServerPickerModal: React.FC = () => {
         }
 
         if (q) {
-          const hay = `${s.providerName} ${s.extensionName || ''} ${s.label} ${s.audioLanguage || ''} ${s.quality}`.toLowerCase();
+          const hay = `${s.label} ${s.audioLanguage || ''} ${s.quality}`.toLowerCase();
           if (!hay.includes(q)) return false;
         }
 
@@ -310,7 +300,6 @@ export const ServerPickerModal: React.FC = () => {
     fullMovieSources,
     verifiedOnly,
     selectedLanguage,
-    selectedProvider,
     sourceTypeFilter,
     qualityFilter,
     sortBy,
@@ -349,6 +338,7 @@ export const ServerPickerModal: React.FC = () => {
       genreIds: serverPickerTarget.genreIds,
       originalLanguage: serverPickerTarget.originalLanguage,
       releaseYear: serverPickerTarget.releaseYear,
+      runtimeMinutes: serverPickerTarget.runtimeMinutes,
       seasonNumber: serverPickerTarget.seasonNumber,
       episodeNumber: serverPickerTarget.episodeNumber,
       episodeTitle: serverPickerTarget.episodeTitle,
@@ -364,7 +354,6 @@ export const ServerPickerModal: React.FC = () => {
   const hasActiveFilter =
     verifiedOnly ||
     selectedLanguage !== 'All' ||
-    selectedProvider !== 'All' ||
     sourceTypeFilter !== 'all' ||
     qualityFilter !== 'all' ||
     serverQuery.trim().length > 0;
@@ -375,25 +364,25 @@ export const ServerPickerModal: React.FC = () => {
       aria-modal="true"
       aria-labelledby="server-picker-title"
       onClick={closeServerPicker}
-      className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/75 backdrop-blur-md p-0 sm:p-4 select-none"
+      className="fixed inset-0 z-[60] flex items-end sm:items-center justify-center bg-black/85 backdrop-blur-2xl p-0 sm:p-4 select-none"
     >
       <motion.div
-        initial={{ opacity: 0, y: 24, scale: 0.98 }}
+        initial={{ opacity: 0, y: 35, scale: 0.96 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
-        exit={{ opacity: 0, y: 20, scale: 0.98 }}
-        transition={{ duration: 0.18, ease: [0.16, 1, 0.3, 1] }}
+        exit={{ opacity: 0, y: 20, scale: 0.96 }}
+        transition={{ duration: 0.24, ease: [0.16, 1, 0.3, 1] }}
         onClick={(e) => e.stopPropagation()}
-        className="w-full sm:max-w-xl max-h-[88vh] rounded-t-3xl sm:rounded-2xl liquid-glass-strong border border-white/20 flex flex-col overflow-hidden shadow-2xl"
+        className="w-full sm:max-w-xl max-h-[90vh] rounded-t-[2.5rem] sm:rounded-3xl bg-zinc-950/95 border border-white/20 flex flex-col overflow-hidden shadow-[0_30px_90px_rgba(0,0,0,0.9)] backdrop-blur-3xl"
       >
         {/* Mobile Drag Indicator */}
         <div className="sm:hidden pt-3 pb-1 flex justify-center">
-          <div className="w-10 h-1 rounded-full bg-white/20" />
+          <div className="w-12 h-1.5 rounded-full bg-white/25" />
         </div>
 
         {/* Modal Header */}
-        <div className="px-5 py-4 border-b border-white/[0.10] flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="h-12 w-9 rounded-lg overflow-hidden shrink-0 bg-[#161B26] border border-white/10">
+        <div className="px-6 py-5 border-b border-white/10 flex items-center justify-between gap-4 bg-gradient-to-r from-white/[0.05] via-transparent to-transparent">
+          <div className="flex items-center gap-4 min-w-0">
+            <div className="relative h-14 w-10 rounded-xl overflow-hidden shrink-0 bg-zinc-900 border border-white/20 shadow-lg">
               <MediaPosterImage
                 path={serverPickerTarget.posterPath}
                 fallbackSrc={serverPickerTarget.fallbackPoster}
@@ -402,12 +391,19 @@ export const ServerPickerModal: React.FC = () => {
                 titleForFallback={serverPickerTarget.title}
                 className="h-full w-full object-cover"
               />
+              <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent pointer-events-none" />
             </div>
             <div className="min-w-0">
-              <h2 id="server-picker-title" className="font-display text-base sm:text-lg font-bold text-white truncate">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded-md text-[10px] font-extrabold uppercase tracking-widest bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                  <Zap className="h-3 w-3 inline mr-1 fill-emerald-400" />
+                  Select Audio & Quality
+                </span>
+              </div>
+              <h2 id="server-picker-title" className="font-display text-lg sm:text-xl font-bold text-white truncate mt-1">
                 {serverPickerTarget.title}
               </h2>
-              <p className="text-xs text-slate-300 truncate">
+              <p className="text-xs font-medium text-slate-400 truncate">
                 {serverPickerTarget.subtitle || (serverPickerTarget.mediaType === 'tv' ? 'TV Series' : 'Movie')}
               </p>
             </div>
@@ -417,233 +413,126 @@ export const ServerPickerModal: React.FC = () => {
             type="button"
             onClick={closeServerPicker}
             aria-label="Close server picker"
-            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-slate-300 hover:text-white transition-colors shrink-0"
+            className="h-11 w-11 flex items-center justify-center rounded-2xl bg-white/10 hover:bg-white/20 border border-white/20 text-slate-300 hover:text-white transition-all duration-200 shrink-0 shadow-md active:scale-95"
           >
             <X className="h-5 w-5" />
           </button>
         </div>
 
         {/* Modal Body / Streams List */}
-        <div className="p-4 sm:p-5 overflow-y-auto space-y-4 flex-1">
+        <div className="p-5 sm:p-6 overflow-y-auto space-y-5 flex-1">
           <div className="flex items-center justify-between gap-2">
-            <p className="text-xs font-semibold text-slate-300 tracking-wide">
-              CHOOSE VERIFIED SERVER BEFORE PLAYING
-            </p>
+            <div className="flex items-center gap-2">
+              <Volume2 className="h-4 w-4 text-emerald-400" />
+              <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                Available Audio Tracks
+              </span>
+            </div>
             {loading ? (
-              <span className="text-xs text-slate-400 flex items-center gap-1.5">
-                <Loader2 className="h-3 w-3 animate-spin text-slate-400" />
-                Probing live streams...
+              <span className="text-xs text-emerald-400 flex items-center gap-2 font-medium bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
+                Loading audio tracks...
               </span>
             ) : isSearchingMore ? (
-              <span className="text-[11px] text-emerald-300 flex items-center gap-1.5 font-mono-tabular">
-                <Loader2 className="h-3 w-3 animate-spin text-emerald-400" />
-                Searching more servers ({filteredFullSources.length} ready)...
+              <span className="text-xs text-emerald-300 flex items-center gap-2 font-medium bg-emerald-500/10 px-3 py-1 rounded-full border border-emerald-500/20">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
+                Finding streams ({filteredFullSources.length} ready)...
               </span>
             ) : fullMovieSources.length > 0 ? (
-              <span className="text-[11px] text-slate-400 font-mono-tabular">
-                {filteredFullSources.length} of {fullMovieSources.length} shown
+              <span className="text-xs font-semibold text-slate-400 bg-white/5 px-2.5 py-1 rounded-full border border-white/10">
+                {filteredFullSources.length} audio tracks
               </span>
             ) : null}
           </div>
 
           {loading ? (
-            <div className="space-y-2.5">
+            <div className="space-y-3">
               {[1, 2, 3].map((n) => (
-                <div key={n} className="h-18 rounded-xl liquid-skeleton" />
+                <div key={n} className="h-20 rounded-2xl bg-white/[0.03] border border-white/10 animate-pulse flex items-center px-4 gap-4">
+                  <div className="h-11 w-11 rounded-xl bg-white/10" />
+                  <div className="flex-1 space-y-2">
+                    <div className="h-4 w-1/3 rounded bg-white/10" />
+                    <div className="h-3 w-1/2 rounded bg-white/5" />
+                  </div>
+                  <div className="h-11 w-24 rounded-xl bg-white/10" />
+                </div>
               ))}
             </div>
           ) : sources.length === 0 ? (
-            <div className="p-6 rounded-xl bg-black/40 border border-white/10 text-center space-y-3">
-              <Server className="h-8 w-8 text-slate-400 mx-auto" />
-              <div className="space-y-1">
-                <p className="text-sm font-semibold text-white">No Direct Stream Found</p>
+            <div className="p-8 rounded-2xl bg-zinc-900/80 border border-white/15 text-center space-y-4 shadow-xl">
+              <div className="h-14 w-14 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center mx-auto text-slate-400">
+                <Volume2 className="h-7 w-7 text-emerald-400" />
+              </div>
+              <div className="space-y-1.5">
+                <p className="text-base font-bold text-white">No Audio Streams Found</p>
                 <p className="text-xs text-slate-300 leading-relaxed max-w-sm mx-auto">
                   {resolveError
                     ? resolveError
-                    : 'This title currently has no reachable stream mirror. You can retry probing or try another title.'}
+                    : 'We could not find active audio streams for this title right now. Try retrying or selecting another title.'}
                 </p>
               </div>
-              <div className="flex items-center justify-center gap-2">
+              <div className="flex items-center justify-center gap-3 pt-2">
                 <button
                   type="button"
                   onClick={() => setRetryTick((t) => t + 1)}
-                  className="min-h-[42px] px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 border border-white/15 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
+                  className="h-11 px-5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-bold text-white inline-flex items-center gap-2 transition-all active:scale-95 shadow-md"
                 >
-                  <RotateCcw className="h-3.5 w-3.5" />
+                  <RotateCcw className="h-4 w-4" />
                   <span>Retry</span>
                 </button>
                 <button
                   type="button"
                   onClick={closeServerPicker}
-                  className="min-h-[42px] px-5 py-2 rounded-xl text-xs font-semibold text-white transition-transform active:scale-95 shadow-lg"
+                  className="h-11 px-6 rounded-xl text-xs font-bold text-white transition-all active:scale-95 shadow-lg"
                   style={{ backgroundColor: accent.hex }}
                 >
-                  Continue
+                  Close
                 </button>
               </div>
             </div>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-4">
               {fullMovieSources.length > 0 && (
-                <div className="space-y-3">
-                  {/* Server Filter Bar */}
-                  <div className="p-3 rounded-xl bg-white/[0.04] border border-white/10 space-y-2.5">
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <div className="text-[11px] font-medium text-slate-300 flex items-center gap-1.5">
-                        <Filter className="h-3.5 w-3.5 text-emerald-400" />
-                        <span>Server Filtering</span>
+                <div className="space-y-4">
+                  {/* Filter & Search Bar */}
+                  <div className="p-4 rounded-2xl bg-white/[0.03] border border-white/10 space-y-3.5 shadow-inner">
+                    <div className="flex items-center justify-between gap-3 flex-wrap">
+                      <div className="text-xs font-bold text-slate-200 flex items-center gap-2">
+                        <Filter className="h-4 w-4 text-emerald-400" />
+                        <span>Filter Audio & Quality</span>
                       </div>
 
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-2">
                         {verifiedDirectCount > 0 && (
                           <button
                             type="button"
                             onClick={() => setVerifiedOnly((v) => !v)}
-                            className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold border inline-flex items-center gap-1 transition-colors ${
+                            className={`px-3 py-1.5 rounded-xl text-xs font-bold border inline-flex items-center gap-1.5 transition-all shadow-sm ${
                               verifiedOnly
-                                ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                                : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
+                                ? 'bg-emerald-500/25 text-emerald-300 border-emerald-500/50 shadow-emerald-500/20'
+                                : 'bg-white/5 text-slate-300 border-white/10 hover:bg-white/10'
                             }`}
                           >
-                            <ShieldCheck className="h-3 w-3" />
-                            <span>Verified Direct ({verifiedDirectCount})</span>
-                          </button>
-                        )}
-
-                        <select
-                          aria-label="Sort servers"
-                          value={sortBy}
-                          onChange={(e) => setSortBy(e.target.value as SortMode)}
-                          className="px-2 py-1 rounded-lg text-[11px] font-semibold bg-black/50 text-slate-200 border border-white/15 focus:outline-none"
-                        >
-                          <option value="recommended">Best Match</option>
-                          <option value="quality">Highest Quality</option>
-                          {hasP2P && <option value="seeders">Most Seeders</option>}
-                        </select>
-                      </div>
-                    </div>
-
-                    {/* Quick Search Filter when multiple servers exist */}
-                    {fullMovieSources.length > 4 && (
-                      <div className="relative">
-                        <Search className="h-3.5 w-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                        <input
-                          type="text"
-                          value={serverQuery}
-                          onChange={(e) => setServerQuery(e.target.value)}
-                          placeholder="Filter by server, title, or extension..."
-                          className="w-full h-8 pl-8 pr-7 rounded-lg bg-black/45 border border-white/10 text-xs text-white placeholder:text-slate-500 focus:outline-none focus:border-white/30"
-                        />
-                        {serverQuery && (
-                          <button
-                            type="button"
-                            onClick={() => setServerQuery('')}
-                            aria-label="Clear server filter"
-                            className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
-                          >
-                            <X className="h-3.5 w-3.5" />
+                            <ShieldCheck className="h-3.5 w-3.5" />
+                            <span>HD Verified ({verifiedDirectCount})</span>
                           </button>
                         )}
                       </div>
-                    )}
-
-                    {/* Source Type & Quality Filters */}
-                    <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
-                      {(
-                        [
-                          { id: 'all', label: 'All Types', show: true },
-                          { id: 'direct', label: 'Direct Stream', show: hasDirect },
-                          { id: 'nuvio', label: 'Nuvio', show: hasNuvio },
-                          { id: 'stremio', label: 'Stremio', show: hasStremio },
-                          { id: 'cloudstream', label: 'CloudStream', show: hasCloudStream },
-                          { id: 'p2p', label: 'Torrent P2P', show: hasP2P },
-                        ] as const
-                      )
-                        .filter((t) => t.show)
-                        .map((t) => (
-                          <button
-                            key={t.id}
-                            type="button"
-                            onClick={() => setSourceTypeFilter(t.id)}
-                            className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0 border transition-colors ${
-                              sourceTypeFilter === t.id
-                                ? 'bg-white text-slate-900 border-white'
-                                : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
-                            }`}
-                          >
-                            {t.label}
-                          </button>
-                        ))}
-
-                      <span className="h-4 w-px bg-white/10 shrink-0 mx-0.5" />
-
-                      {(
-                        [
-                          { id: 'all', label: 'Any Quality' },
-                          { id: '4k', label: '4K' },
-                          { id: '1080p', label: '1080p' },
-                          { id: '720p', label: '720p' },
-                          { id: '480p', label: '480p' },
-                        ] as const
-                      ).map((qOpt) => (
-                        <button
-                          key={qOpt.id}
-                          type="button"
-                          onClick={() => setQualityFilter(qOpt.id)}
-                          className={`px-2 py-1 rounded-lg text-[11px] font-semibold shrink-0 border transition-colors ${
-                            qualityFilter === qOpt.id
-                              ? 'bg-sky-500/25 text-sky-200 border-sky-400/50'
-                              : 'bg-white/[0.04] text-slate-400 border-white/10 hover:text-slate-200'
-                          }`}
-                        >
-                          {qOpt.label}
-                        </button>
-                      ))}
                     </div>
-
-                    {/* Provider Filter Row */}
-                    {availableProviders.length > 1 && (
-                      <div className="flex items-center gap-1.5 overflow-x-auto pt-0.5">
-                        <Server className="h-3.5 w-3.5 text-slate-400 shrink-0 mr-0.5" />
-                        <button
-                          type="button"
-                          onClick={() => setSelectedProvider('All')}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0 border transition-colors ${
-                            selectedProvider === 'All'
-                              ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50'
-                              : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
-                          }`}
-                        >
-                          All Providers
-                        </button>
-                        {availableProviders.map(({ name, count }) => (
-                          <button
-                            key={name}
-                            type="button"
-                            onClick={() => setSelectedProvider(name)}
-                            className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0 border transition-colors ${
-                              selectedProvider === name
-                                ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50'
-                                : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
-                            }`}
-                          >
-                            {name} ({count})
-                          </button>
-                        ))}
-                      </div>
-                    )}
 
                     {/* Language Filter Row */}
                     {availableLanguages.length > 1 && (
-                      <div className="flex items-center gap-1.5 overflow-x-auto pt-0.5">
-                        <Languages className="h-3.5 w-3.5 text-slate-400 shrink-0 mr-0.5" />
+                      <div className="flex items-center gap-2 overflow-x-auto pt-1 pb-1 scrollbar-none">
+                        <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider shrink-0 mr-1">
+                          Audio:
+                        </span>
                         <button
                           type="button"
                           onClick={() => setSelectedLanguage('All')}
-                          className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0 border transition-colors ${
+                          className={`px-3.5 py-1.5 rounded-xl text-xs font-bold shrink-0 border transition-all ${
                             selectedLanguage === 'All'
-                              ? 'text-white border-transparent'
-                              : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
+                              ? 'text-white border-transparent shadow-md'
+                              : 'bg-white/5 text-slate-300 border-white/10 hover:bg-white/10'
                           }`}
                           style={
                             selectedLanguage === 'All'
@@ -651,17 +540,17 @@ export const ServerPickerModal: React.FC = () => {
                               : undefined
                           }
                         >
-                          All Languages
+                          All Audio
                         </button>
                         {availableLanguages.map(({ lang, count }) => (
                           <button
                             key={lang}
                             type="button"
                             onClick={() => setSelectedLanguage(lang)}
-                            className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold shrink-0 border transition-colors ${
+                            className={`px-3.5 py-1.5 rounded-xl text-xs font-bold shrink-0 border transition-all ${
                               selectedLanguage === lang
-                                ? 'text-white border-transparent'
-                                : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
+                                ? 'text-white border-transparent shadow-md'
+                                : 'bg-white/5 text-slate-300 border-white/10 hover:bg-white/10'
                             }`}
                             style={
                               selectedLanguage === lang
@@ -676,22 +565,22 @@ export const ServerPickerModal: React.FC = () => {
                     )}
                   </div>
 
-                  {/* Filtered Server List */}
+                  {/* Filtered Stream List */}
                   {filteredFullSources.length === 0 ? (
-                    <div className="p-5 rounded-xl bg-black/40 border border-white/10 text-center space-y-3">
-                      <Film className="h-7 w-7 text-slate-400 mx-auto" />
+                    <div className="p-8 rounded-2xl bg-zinc-900/80 border border-white/15 text-center space-y-3">
+                      <Film className="h-8 w-8 text-slate-400 mx-auto" />
                       <div className="space-y-1">
-                        <p className="text-sm font-semibold text-white">No Servers Match Current Filters</p>
-                        <p className="text-xs text-slate-300">
-                          Try resetting filters or disabling Verified Direct to view P2P and fallback servers.
+                        <p className="text-base font-bold text-white">No Audio Tracks Match Filter</p>
+                        <p className="text-xs text-slate-300 max-w-xs mx-auto">
+                          Try selecting another audio language or resetting filters.
                         </p>
                       </div>
-                      <div className="flex items-center justify-center gap-2">
+                      <div className="flex items-center justify-center gap-3 pt-2">
                         {hasActiveFilter && (
                           <button
                             type="button"
                             onClick={resetFilters}
-                            className="min-h-[38px] px-4 py-1.5 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-xs font-semibold text-white inline-flex items-center gap-1.5 transition-colors"
+                            className="h-10 px-4 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-bold text-white inline-flex items-center gap-2 transition-all active:scale-95"
                           >
                             <RotateCcw className="h-3.5 w-3.5" />
                             <span>Reset Filters</span>
@@ -700,94 +589,65 @@ export const ServerPickerModal: React.FC = () => {
                         <button
                           type="button"
                           onClick={closeServerPicker}
-                          className="min-h-[38px] px-4 py-1.5 rounded-xl text-xs font-semibold text-white transition-transform active:scale-95"
+                          className="h-10 px-5 rounded-xl text-xs font-bold text-white transition-all active:scale-95 shadow-md"
                           style={{ backgroundColor: accent.hex }}
                         >
-                          Continue
+                          Close
                         </button>
                       </div>
                     </div>
                   ) : (
-                    <div className="space-y-2">
+                    <div className="space-y-3">
                       {filteredFullSources.map((source, idx) => {
-                        const isP2P = source.url.includes('/api/torrent/stream');
-                        const isCS = Boolean(source.extensionName) || source.id.startsWith('cs-');
+                        const audioLang = source.audioLanguage ? extractLanguageTags(source.audioLanguage)[0] : 'Original Audio';
                         return (
-                          <button
+                          <motion.button
                             key={`${source.id}-${idx}`}
                             type="button"
+                            whileHover={{ scale: 1.01, y: -2 }}
+                            whileTap={{ scale: 0.99 }}
                             onClick={() => handleSelectSource(source)}
-                            className="w-full text-left p-3.5 rounded-xl bg-black/40 hover:bg-white/[0.08] border border-white/15 hover:border-white/35 transition-all flex items-center justify-between gap-3 group"
+                            className="w-full text-left p-4 rounded-2xl bg-gradient-to-r from-zinc-900/95 to-zinc-900/80 hover:from-zinc-800/95 hover:to-zinc-800/90 border border-white/15 hover:border-emerald-500/50 transition-all flex items-center justify-between gap-4 group shadow-xl hover:shadow-emerald-500/10"
                           >
-                            <div className="min-w-0 flex items-center gap-3">
-                              <div className="h-9 w-9 rounded-lg bg-white/[0.08] flex items-center justify-center shrink-0 text-slate-200 group-hover:text-white">
-                                {isCS ? (
-                                  <Download className="h-4 w-4 text-blue-400" />
-                                ) : source.id.startsWith('stremio-') ? (
-                                  <Boxes className="h-4 w-4 text-purple-400" />
-                                ) : source.format === 'hls' ? (
-                                  <Tv className="h-4 w-4" />
-                                ) : (
-                                  <HardDrive className="h-4 w-4" />
-                                )}
+                            <div className="min-w-0 flex items-center gap-4">
+                              <div className="h-12 w-12 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center shrink-0 text-emerald-400 group-hover:bg-emerald-500/25 transition-all shadow-inner">
+                                <Volume2 className="h-6 w-6" />
                               </div>
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-1.5 flex-wrap">
-                                  <p className="text-sm font-semibold text-white truncate">
-                                    {source.providerName}
+                              <div className="min-w-0 space-y-1.5">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <p className="font-display text-base font-extrabold text-white group-hover:text-emerald-300 transition-colors">
+                                    {audioLang} Audio
                                   </p>
+                                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 uppercase tracking-wider">
+                                    {source.quality || '1080p FHD'}
+                                  </span>
                                   {source.isVerified && (
-                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 inline-flex items-center gap-0.5 uppercase">
-                                      <CheckCircle2 className="h-2.5 w-2.5" />
-                                      Verified
-                                    </span>
-                                  )}
-                                  {source.audioLanguage && (
-                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-sky-500/20 text-sky-300 border border-sky-500/30">
-                                      {extractLanguageTags(source.audioLanguage)[0]}
-                                    </span>
-                                  )}
-                                  {isCS && (
-                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30 uppercase">
-                                      {source.extensionName || 'CloudStream'}
-                                    </span>
-                                  )}
-                                  {isP2P && (
-                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-500/20 text-purple-300 border border-purple-500/30 uppercase">
-                                      P2P
-                                    </span>
-                                  )}
-                                  {source.url.includes('remux=1') && (
-                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-amber-500/20 text-amber-300 border border-amber-500/30 uppercase">
-                                      Remux
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-sky-500/20 text-sky-300 border border-sky-500/40 uppercase tracking-wider">
+                                      HD Verified
                                     </span>
                                   )}
                                   {source.sizeLabel && (
-                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono-tabular font-semibold bg-white/10 text-slate-200 border border-white/15">
+                                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono-tabular font-bold bg-white/10 text-slate-200 border border-white/15">
                                       {source.sizeLabel}
                                     </span>
                                   )}
-                                  {source.seeders !== undefined && (
-                                    <span className="px-1.5 py-0.5 rounded text-[9px] font-mono-tabular font-semibold bg-blue-500/20 text-blue-300 border border-blue-500/30">
-                                      {source.seeders} seeders
-                                    </span>
-                                  )}
                                 </div>
-                                <p className="text-xs text-slate-300 truncate mt-0.5 font-mono-tabular">
-                                  {source.quality} · {source.format.toUpperCase()}
-                                  {source.label ? ` · ${source.label}` : ''}
+                                <p className="text-xs text-slate-300 truncate font-mono-tabular flex items-center gap-2">
+                                  <span className="uppercase text-emerald-400 font-semibold">{source.format}</span>
+                                  <span className="text-white/30">•</span>
+                                  <span className="text-slate-400">High Quality Audio Stream</span>
                                 </p>
                               </div>
                             </div>
 
-                            <span
-                              className="min-h-[40px] px-3.5 rounded-xl text-white text-xs font-bold inline-flex items-center gap-1.5 shrink-0 shadow-md group-hover:scale-105 transition-transform"
+                            <div
+                              className="h-12 px-6 rounded-xl text-white text-xs font-extrabold inline-flex items-center gap-2 shrink-0 shadow-lg group-hover:scale-105 group-hover:shadow-emerald-500/30 transition-all"
                               style={{ backgroundColor: accent.hex }}
                             >
-                              <Play className="h-3.5 w-3.5 fill-current" />
+                              <Play className="h-4 w-4 fill-current" />
                               <span>Play</span>
-                            </span>
-                          </button>
+                            </div>
+                          </motion.button>
                         );
                       })}
                     </div>
@@ -795,51 +655,43 @@ export const ServerPickerModal: React.FC = () => {
                 </div>
               )}
 
-              {/* Notice when only trailers exist for a modern copyrighted movie */}
-              {fullMovieSources.length === 0 && trailerSources.length > 0 && (
-                <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/25 flex items-start gap-2.5 text-xs text-amber-200">
-                  <Info className="h-4 w-4 shrink-0 mt-0.5 text-amber-300" />
-                  <p className="leading-relaxed">
-                    Only the official studio trailer is currently available for this title. You can watch the trailer below or go back to browse another release.
-                  </p>
-                </div>
-              )}
-
               {/* Official Trailer Servers */}
               {trailerSources.length > 0 && (
-                <div className="space-y-2 pt-1">
-                  <div className="text-[11px] font-medium text-slate-400 flex items-center gap-1.5">
-                    <Youtube className="h-3.5 w-3.5 text-red-500" />
+                <div className="space-y-3 pt-2">
+                  <div className="text-xs font-bold text-slate-400 flex items-center gap-2 uppercase tracking-wider">
+                    <Youtube className="h-4 w-4 text-red-500" />
                     <span>Official Studio Trailer</span>
                   </div>
 
-                  <div className="space-y-2">
+                  <div className="space-y-2.5">
                     {trailerSources.map((source, idx) => (
-                      <button
+                      <motion.button
                         key={`${source.id}-${idx}`}
                         type="button"
+                        whileHover={{ scale: 1.01, y: -1 }}
+                        whileTap={{ scale: 0.99 }}
                         onClick={() => handleSelectSource(source)}
-                        className="w-full text-left p-3.5 rounded-xl bg-black/40 hover:bg-white/[0.08] border border-white/15 hover:border-white/35 transition-all flex items-center justify-between gap-3 group"
+                        className="w-full text-left p-4 rounded-2xl bg-zinc-900/90 hover:bg-zinc-800/90 border border-white/15 hover:border-red-500/50 transition-all flex items-center justify-between gap-4 group shadow-lg"
                       >
-                        <div className="min-w-0 flex items-center gap-3">
-                          <div className="h-9 w-9 rounded-lg bg-red-600/20 text-red-400 flex items-center justify-center shrink-0">
-                            <Youtube className="h-4 w-4" />
+                        <div className="min-w-0 flex items-center gap-3.5">
+                          <div className="h-11 w-11 rounded-xl bg-red-600/20 text-red-400 border border-red-500/30 flex items-center justify-center shrink-0 shadow-inner">
+                            <Youtube className="h-5 w-5" />
                           </div>
-                          <div className="min-w-0">
-                            <p className="text-sm font-semibold text-white truncate">
+                          <div className="min-w-0 space-y-1">
+                            <p className="font-display text-sm font-bold text-white truncate group-hover:text-red-300 transition-colors">
                               {source.label}
                             </p>
-                            <p className="text-xs text-slate-300 truncate mt-0.5">
+                            <p className="text-xs text-slate-300 truncate">
                               {source.note || 'Official high-definition trailer'}
                             </p>
                           </div>
                         </div>
 
-                        <span className="min-h-[40px] px-3.5 rounded-xl bg-white/15 group-hover:bg-white/25 border border-white/20 text-white text-xs font-semibold inline-flex items-center gap-1.5 shrink-0 transition-colors">
-                          <Play className="h-3.5 w-3.5 fill-current" />
-                          <span>Watch Trailer</span>
-                        </span>
-                      </button>
+                        <div className="h-11 px-5 rounded-xl bg-white/15 group-hover:bg-red-600 border border-white/20 group-hover:border-red-500 text-white text-xs font-bold inline-flex items-center gap-2 shrink-0 transition-all shadow-md">
+                          <Play className="h-4 w-4 fill-current" />
+                          <span>Watch</span>
+                        </div>
+                      </motion.button>
                     ))}
                   </div>
                 </div>
@@ -849,12 +701,15 @@ export const ServerPickerModal: React.FC = () => {
         </div>
 
         {/* Modal Footer */}
-        <div className="px-5 py-3.5 border-t border-white/[0.08] bg-black/40 flex items-center justify-between text-xs text-slate-400">
-          <span>Verified direct streams prioritized</span>
+        <div className="px-6 py-4 border-t border-white/10 bg-black/60 flex items-center justify-between text-xs font-semibold text-slate-400">
+          <span className="flex items-center gap-1.5 text-emerald-400">
+            <ShieldCheck className="h-4 w-4" />
+            Optimized audio & video streams
+          </span>
           <button
             type="button"
             onClick={closeServerPicker}
-            className="text-slate-300 hover:text-white transition-colors"
+            className="px-4 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-slate-200 hover:text-white transition-colors"
           >
             Cancel
           </button>

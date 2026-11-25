@@ -83,9 +83,14 @@ function mapRawMedia(raw: TmdbRawMedia, forcedType?: MediaType): MediaItem {
     genreIds: raw.genre_ids || raw.genres?.map((g) => g.id) || [],
     originalLanguage: raw.original_language,
     popularity: raw.popularity,
+    sourceTag: 'TMDB',
     fallbackPoster: fallbackPool[fallbackIdx],
     fallbackBackdrop: FALLBACK_ART.heroNeonHorizon,
   };
+}
+
+function tagCuratedFallback(items: MediaItem[]): MediaItem[] {
+  return items.map((item) => ({ ...item, sourceTag: 'Curated Fallback' }));
 }
 
 async function tmdbFetch<T>(endpoint: string, params: Record<string, string | number> = {}): Promise<T> {
@@ -184,7 +189,7 @@ export const tmdbService = {
         isLive: true,
       };
     } catch {
-      return { items: CURATED_MOVIES, isLive: false };
+      return { items: tagCuratedFallback(CURATED_MOVIES), isLive: false };
     }
   },
 
@@ -196,7 +201,7 @@ export const tmdbService = {
         isLive: true,
       };
     } catch {
-      return { items: CURATED_SERIES, isLive: false };
+      return { items: tagCuratedFallback(CURATED_SERIES), isLive: false };
     }
   },
 
@@ -212,7 +217,7 @@ export const tmdbService = {
       ].sort((a, b) => b.voteAverage - a.voteAverage);
       return { items: combined, isLive: true };
     } catch {
-      const sorted = [...CURATED_MOVIES, ...CURATED_SERIES].sort(
+      const sorted = tagCuratedFallback([...CURATED_MOVIES, ...CURATED_SERIES]).sort(
         (a, b) => b.voteAverage - a.voteAverage
       );
       return { items: sorted, isLive: false };
@@ -243,8 +248,10 @@ export const tmdbService = {
       });
       return data.results.map((r) => mapRawMedia(r, 'movie'));
     } catch {
-      return [...CURATED_MOVIES, ...CURATED_SERIES].filter((item) =>
-        item.genreIds.includes(genreId)
+      return tagCuratedFallback(
+        [...CURATED_MOVIES, ...CURATED_SERIES].filter((item) =>
+          item.genreIds.includes(genreId)
+        )
       );
     }
   },
@@ -259,7 +266,7 @@ export const tmdbService = {
     } catch {
       // Fallback to curated catalog
     }
-    return [...CURATED_MOVIES.slice(0, 6), ...CURATED_SERIES.slice(0, 6)];
+    return tagCuratedFallback([...CURATED_MOVIES.slice(0, 6), ...CURATED_SERIES.slice(0, 6)]);
   },
 
   async discoverFiltered(options: {
@@ -319,18 +326,20 @@ export const tmdbService = {
       ].sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
       return combined;
     } catch {
-      return [...CURATED_MOVIES, ...CURATED_SERIES].filter((item) => {
-        if (type !== 'all' && item.mediaType !== type) return false;
-        if (genreId && !item.genreIds.includes(genreId)) return false;
-        if (year) {
-          const y = parseInt((item.releaseDate || '').slice(0, 4), 10);
-          if (year === '2010s') return y >= 2010 && y <= 2019;
-          if (year === '2000s') return y >= 2000 && y <= 2009;
-          if (year === 'Classic') return y > 0 && y < 2000;
-          return String(y) === year;
-        }
-        return true;
-      });
+      return tagCuratedFallback(
+        [...CURATED_MOVIES, ...CURATED_SERIES].filter((item) => {
+          if (type !== 'all' && item.mediaType !== type) return false;
+          if (genreId && !item.genreIds.includes(genreId)) return false;
+          if (year) {
+            const y = parseInt((item.releaseDate || '').slice(0, 4), 10);
+            if (year === '2010s') return y >= 2010 && y <= 2019;
+            if (year === '2000s') return y >= 2000 && y <= 2009;
+            if (year === 'Classic') return y > 0 && y < 2000;
+            return String(y) === year;
+          }
+          return true;
+        })
+      );
     }
   },
 
@@ -530,7 +539,7 @@ export const tmdbService = {
   async searchMulti(query: string): Promise<MultiSearchResults> {
     const clean = query.trim();
     if (!clean) {
-      return { moviesAndShows: [], people: [] };
+      return { moviesAndShows: [], people: [], isFallback: false };
     }
 
     try {
@@ -564,15 +573,17 @@ export const tmdbService = {
         }
       }
 
-      return { moviesAndShows, people };
+      return { moviesAndShows, people, isFallback: false };
     } catch {
       const q = clean.toLowerCase();
-      const moviesAndShows = [...CURATED_MOVIES, ...CURATED_SERIES].filter(
-        (m) =>
-          m.title.toLowerCase().includes(q) ||
-          m.overview.toLowerCase().includes(q)
+      const moviesAndShows = tagCuratedFallback(
+        [...CURATED_MOVIES, ...CURATED_SERIES].filter(
+          (m) =>
+            m.title.toLowerCase().includes(q) ||
+            m.overview.toLowerCase().includes(q)
+        )
       );
-      return { moviesAndShows, people: [] };
+      return { moviesAndShows, people: [], isFallback: true };
     }
   },
 
@@ -643,34 +654,107 @@ export const tmdbService = {
     return undefined;
   },
 
-  async getMediaLogo(id: number, mediaType: MediaType): Promise<string | null> {
-    if (!id || (id >= 880001 && id <= 899999)) return null;
-    const cacheKey = `${mediaType}:${id}`;
-    const cached = mediaLogoCache.get(cacheKey);
-    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-      return cached.data;
+  async getMediaLogoCandidates(
+    id: number,
+    mediaType: MediaType,
+    imdbId?: string,
+    existingLogoPath?: string | null,
+    existingLogoPaths?: string[]
+  ): Promise<string[]> {
+    const candidates: string[] = [];
+    const pushUnique = (url: string | null | undefined) => {
+      if (url && !candidates.includes(url)) candidates.push(url);
+    };
+
+    const resolveUrl = (pathOrUrl?: string | null): string | null => {
+      if (!pathOrUrl) return null;
+      if (pathOrUrl.startsWith('http://') || pathOrUrl.startsWith('https://')) return pathOrUrl;
+      return getTmdbImageUrl(pathOrUrl, pathOrUrl.toLowerCase().endsWith('.svg') ? 'original' : 'w500');
+    };
+
+    pushUnique(resolveUrl(existingLogoPath));
+    for (const p of existingLogoPaths || []) {
+      pushUnique(resolveUrl(p));
     }
-    try {
-      const data = await tmdbFetch<{
-        logos?: Array<{
-          file_path?: string;
-          iso_639_1?: string | null;
-          vote_average?: number;
-        }>;
-      }>(`/${mediaType}/${id}/images`, {
-        include_image_language: 'en,null',
+
+    if (id && !(id >= 880001 && id <= 899999)) {
+      const cacheKey = `${mediaType}:${id}:list`;
+      const cached = mediaLogoCache.get(cacheKey);
+      if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS && cached.data) {
+        for (const u of cached.data.split('|').filter(Boolean)) {
+          pushUnique(u);
+        }
+      } else {
+        try {
+          const data = await tmdbFetch<{
+            logos?: Array<{
+              file_path?: string;
+              iso_639_1?: string | null;
+              vote_average?: number;
+            }>;
+          }>(`/${mediaType}/${id}/images`, {
+            include_image_language: 'en,hi,bn,ja,ko,null',
+          });
+          const rawLogos = (data.logos || []).filter((l) => Boolean(l.file_path));
+          const langRank = (iso?: string | null) => {
+            if (iso === 'en') return 0;
+            if (!iso) return 1;
+            if (iso === 'hi') return 2;
+            if (iso === 'bn') return 3;
+            return 4;
+          };
+          const sorted = [...rawLogos].sort((a, b) => {
+            const diff = langRank(a.iso_639_1) - langRank(b.iso_639_1);
+            if (diff !== 0) return diff;
+            return (b.vote_average || 0) - (a.vote_average || 0);
+          });
+          const resolvedUrls = sorted
+            .map((l) => resolveUrl(l.file_path))
+            .filter((u): u is string => Boolean(u));
+          if (resolvedUrls.length > 0) {
+            mediaLogoCache.set(cacheKey, {
+              fetchedAt: Date.now(),
+              data: resolvedUrls.slice(0, 6).join('|'),
+            });
+            for (const u of resolvedUrls) pushUnique(u);
+          }
+        } catch {
+          // Do not poison cache on transient network errors
+        }
+      }
+    }
+
+    // Fallback to Metahub IMDb clearlogo when TMDB yields nothing or fails
+    let resolvedImdb = imdbId;
+    if (!resolvedImdb && id && !(id >= 880001 && id <= 899999)) {
+      resolvedImdb = await this.getImdbId(id, mediaType);
+    }
+    if (resolvedImdb) {
+      pushUnique(`https://images.metahub.space/logo/medium/${resolvedImdb}/img`);
+      pushUnique(`https://live.metahub.space/logo/medium/${resolvedImdb}/img`);
+    }
+
+    if (candidates[0] && id) {
+      mediaLogoCache.set(`${mediaType}:${id}`, {
+        fetchedAt: Date.now(),
+        data: candidates[0],
       });
-      const logos = (data.logos || []).filter((l) => Boolean(l.file_path));
-      const picked =
-        logos.find((l) => l.iso_639_1 === 'en') ||
-        logos.find((l) => !l.iso_639_1) ||
-        logos[0];
-      const logoUrl = picked?.file_path ? getTmdbImageUrl(picked.file_path, 'w500') : null;
-      mediaLogoCache.set(cacheKey, { fetchedAt: Date.now(), data: logoUrl });
-      return logoUrl;
-    } catch {
-      mediaLogoCache.set(cacheKey, { fetchedAt: Date.now(), data: null });
+    }
+
+    return candidates;
+  },
+
+  async getMediaLogo(id: number, mediaType: MediaType, imdbId?: string): Promise<string | null> {
+    if (!id || (id >= 880001 && id <= 899999)) {
+      if (imdbId) return `https://images.metahub.space/logo/medium/${imdbId}/img`;
       return null;
     }
+    const cacheKey = `${mediaType}:${id}`;
+    const cached = mediaLogoCache.get(cacheKey);
+    if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS && cached.data) {
+      return cached.data;
+    }
+    const candidates = await this.getMediaLogoCandidates(id, mediaType, imdbId);
+    return candidates[0] || null;
   },
 };

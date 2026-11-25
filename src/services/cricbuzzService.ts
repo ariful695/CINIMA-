@@ -4,7 +4,7 @@ import {
   SportsEvent,
   SportsEventStatus,
 } from '../types/media';
-import { fetchAndParseIptvM3u, probeChannelPlayableInBrowser } from './iptvParser';
+import { probeChannelPlayableInBrowser } from './iptvParser';
 
 interface CricbuzzInningsScore {
   runs?: number;
@@ -70,6 +70,8 @@ interface CricbuzzResponse {
 }
 
 const CUSTOM_SPORTS_CHANNELS_KEY = 'kinostream_custom_sports_channels';
+const CRICBUZZ_API_KEY_OVERRIDE_KEY = 'kinostream_cricbuzz_api_key';
+const CRICBUZZ_FIXTURES_CACHE_KEY = 'kinostream_cricbuzz_fixtures_v1';
 
 const COUNTRY_ISO_MAP: Array<[RegExp, string]> = [
   [/\bindia\b/i, 'in'],
@@ -157,12 +159,21 @@ function formatTeamScore(scoreObj?: {
   return parts.length > 0 ? parts.join(' & ') : undefined;
 }
 
+function getStoredApiKeyOverride(): string {
+  try {
+    return (localStorage.getItem(CRICBUZZ_API_KEY_OVERRIDE_KEY) || '').trim();
+  } catch {
+    return '';
+  }
+}
+
 function getCricbuzzConfig() {
   const cfg = window.__KINO_API_CONFIG__?.cricbuzzApi;
+  const overrideKey = getStoredApiKeyOverride();
   return {
     baseUrl: (cfg?.baseUrl || 'https://cricbuzz-cricket.p.rapidapi.com').replace(/\/+$/, ''),
     rapidApiHost: cfg?.rapidApiHost || 'cricbuzz-cricket.p.rapidapi.com',
-    rapidApiKey: cfg?.rapidApiKey || '',
+    rapidApiKey: overrideKey || (cfg?.rapidApiKey || '').trim(),
     routes: {
       live: cfg?.routes?.live || '/matches/v1/live',
       upcoming: cfg?.routes?.upcoming || '/matches/v1/upcoming',
@@ -344,28 +355,6 @@ async function getVerifiedPlayableSportsChannels(
     }
   }
 
-  const iptvCfg = window.__KINO_API_CONFIG__?.iptvOrg;
-  const catBase = iptvCfg?.categoryBaseUrl || 'https://iptv-org.github.io/iptv/categories';
-  const countryBase = iptvCfg?.countryBaseUrl || 'https://iptv-org.github.io/iptv/countries';
-
-  const feedConfigs = [
-    { url: `${catBase}/sports.m3u`, id: 'iptv-org-sports', name: 'iptv-org · Sports' },
-    { url: `${countryBase}/in.m3u`, id: 'iptv-org-in', name: 'iptv-org · India' },
-    { url: `${countryBase}/pk.m3u`, id: 'iptv-org-pk', name: 'iptv-org · Pakistan' },
-    { url: `${countryBase}/bd.m3u`, id: 'iptv-org-bd', name: 'iptv-org · Bangladesh' },
-  ];
-
-  const feedResults = await Promise.all(
-    feedConfigs.map((fc) =>
-      fetchAndParseIptvM3u({
-        url: fc.url,
-        playlistId: fc.id,
-        playlistName: fc.name,
-        forceRefresh,
-      }).catch(() => ({ channels: [] as LiveChannel[], sourceUrl: fc.url }))
-    )
-  );
-
   const seen = new Set<string>();
   const candidates: LiveChannel[] = [];
 
@@ -389,9 +378,7 @@ async function getVerifiedPlayableSportsChannels(
     (c) => c.streamUrl.startsWith('https://') && isSportsChannel(c)
   );
 
-  const regionalSports = feedResults.flatMap((res) => res.channels.filter(isSportsChannel));
-
-  for (const ch of [...htmlConfiguredChannels, ...appSports, ...regionalSports]) {
+  for (const ch of [...htmlConfiguredChannels, ...appSports]) {
     if (!ch.streamUrl.startsWith('https://')) continue;
     if (seen.has(ch.streamUrl)) continue;
     seen.add(ch.streamUrl);
@@ -456,7 +443,7 @@ function pickChannelsForMatch(
     let rel = 0;
     if (ch.playlistName === 'Saved Custom Stream') rel += 200;
     if (ch.playlistName === 'Configured Sports Feed') rel += 120;
-    if (ch.playlistName && !ch.playlistName.toLowerCase().includes('iptv-org')) {
+    if (ch.playlistName) {
       rel += 90;
     }
     if (name.includes('star sports') || name.includes('sony sports') || name.includes('sony ten')) {
@@ -571,10 +558,185 @@ function parseCricbuzzPayload(
   return events;
 }
 
+function saveCachedFixtures(events: SportsEvent[]): void {
+  if (events.length === 0) return;
+  try {
+    localStorage.setItem(
+      CRICBUZZ_FIXTURES_CACHE_KEY,
+      JSON.stringify({ savedAt: Date.now(), events: events.slice(0, 24) })
+    );
+  } catch {
+    // Ignore storage write failure
+  }
+}
+
+function getCachedOrPublicFixtures(
+  verifiedChannels: SportsBroadcastChannel[]
+): { events: SportsEvent[]; fromCache: boolean } {
+  try {
+    const raw = localStorage.getItem(CRICBUZZ_FIXTURES_CACHE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as { savedAt?: number; events?: SportsEvent[] };
+      if (parsed && Array.isArray(parsed.events) && parsed.events.length > 0) {
+        const refreshed = parsed.events.map((ev) => ({
+          ...ev,
+          channels:
+            verifiedChannels.length > 0
+              ? pickChannelsForMatch(
+                  {
+                    seriesName: ev.leagueName,
+                    venueInfo: { country: ev.venue },
+                    team1: { teamName: ev.team1.name },
+                    team2: { teamName: ev.team2.name },
+                  },
+                  ev.matchType,
+                  verifiedChannels
+                )
+              : ev.channels,
+        }));
+        return { events: refreshed, fromCache: true };
+      }
+    }
+  } catch {
+    // Fall through to public fixture schedule
+  }
+
+  const now = Date.now();
+  const publicFixtures: Array<{
+    id: string;
+    matchType: string;
+    leagueName: string;
+    matchDesc: string;
+    formatLabel: string;
+    status: SportsEventStatus;
+    stateText: string;
+    statusSummary: string;
+    startTimeMs: number;
+    venue: string;
+    team1Name: string;
+    team1Short: string;
+    team2Name: string;
+    team2Short: string;
+  }> = [
+    {
+      id: 'public-fixture-ind-aus',
+      matchType: 'International',
+      leagueName: 'ICC International Schedule',
+      matchDesc: 'T20 International Showcase',
+      formatLabel: 'T20I',
+      status: 'upcoming',
+      stateText: 'Public Schedule',
+      statusSummary: 'Fixture metadata preview — add RapidAPI key for live scores',
+      startTimeMs: now + 3 * 60 * 60 * 1000,
+      venue: 'Wankhede Stadium, India',
+      team1Name: 'India',
+      team1Short: 'IND',
+      team2Name: 'Australia',
+      team2Short: 'AUS',
+    },
+    {
+      id: 'public-fixture-eng-sa',
+      matchType: 'International',
+      leagueName: 'ICC ODI Series',
+      matchDesc: 'ODI International',
+      formatLabel: 'ODI',
+      status: 'upcoming',
+      stateText: 'Public Schedule',
+      statusSummary: 'Fixture metadata preview — verified sports broadcasts attached',
+      startTimeMs: now + 18 * 60 * 60 * 1000,
+      venue: "Lord's, England",
+      team1Name: 'England',
+      team1Short: 'ENG',
+      team2Name: 'South Africa',
+      team2Short: 'RSA',
+    },
+    {
+      id: 'public-fixture-pak-ban',
+      matchType: 'International',
+      leagueName: 'Asian Cricket Trophy',
+      matchDesc: 'T20 International',
+      formatLabel: 'T20I',
+      status: 'upcoming',
+      stateText: 'Public Schedule',
+      statusSummary: 'Public broadcast channels available below',
+      startTimeMs: now + 26 * 60 * 60 * 1000,
+      venue: 'Gaddafi Stadium, Pakistan',
+      team1Name: 'Pakistan',
+      team1Short: 'PAK',
+      team2Name: 'Bangladesh',
+      team2Short: 'BAN',
+    },
+  ];
+
+  const events: SportsEvent[] = publicFixtures.map((f) => ({
+    id: f.id,
+    matchType: f.matchType,
+    leagueName: f.leagueName,
+    matchDesc: f.matchDesc,
+    formatLabel: f.formatLabel,
+    status: f.status,
+    stateText: f.stateText,
+    statusSummary: f.statusSummary,
+    startTimeMs: f.startTimeMs,
+    venue: f.venue,
+    team1: {
+      name: f.team1Name,
+      shortName: f.team1Short,
+      flagUrl: getTeamFlagUrl(f.team1Name),
+      accentColor: getTeamColor(f.team1Name),
+    },
+    team2: {
+      name: f.team2Name,
+      shortName: f.team2Short,
+      flagUrl: getTeamFlagUrl(f.team2Name),
+      accentColor: getTeamColor(f.team2Name),
+    },
+    channels: pickChannelsForMatch(
+      {
+        seriesName: f.leagueName,
+        venueInfo: { country: f.venue },
+        team1: { teamName: f.team1Name },
+        team2: { teamName: f.team2Name },
+      },
+      f.matchType,
+      verifiedChannels
+    ),
+  }));
+
+  return { events, fromCache: false };
+}
+
 let cachedSportsResult: { timestamp: number; events: SportsEvent[]; error?: string } | null = null;
 const CACHE_TTL_MS = 25_000;
 
 export const cricbuzzService = {
+  hasApiKeyOverride(): boolean {
+    return Boolean(getStoredApiKeyOverride());
+  },
+
+  saveApiKeyOverride(apiKey: string): void {
+    const clean = apiKey.trim();
+    try {
+      if (clean) {
+        localStorage.setItem(CRICBUZZ_API_KEY_OVERRIDE_KEY, clean);
+      } else {
+        localStorage.removeItem(CRICBUZZ_API_KEY_OVERRIDE_KEY);
+      }
+    } catch {
+      // Ignore storage write failure
+    }
+    this.clearCache();
+  },
+
+  clearApiKeyOverride(): void {
+    try {
+      localStorage.removeItem(CRICBUZZ_API_KEY_OVERRIDE_KEY);
+    } catch {
+      // Ignore storage clear failure
+    }
+    this.clearCache();
+  },
+
   async fetchSportsEvents(
     appLiveChannels: LiveChannel[] = [],
     forceRefresh = false
@@ -583,32 +745,40 @@ export const cricbuzzService = {
     verifiedChannels: SportsBroadcastChannel[];
     error?: string;
     apiConfigured: boolean;
+    usingFallback: boolean;
+    authError?: boolean;
   }> {
     const cfg = getCricbuzzConfig();
-    if (!cfg.rapidApiKey) {
-      return {
-        events: [],
-        verifiedChannels: [],
-        error: 'Cricbuzz RapidAPI key is missing in index.html.',
-        apiConfigured: false,
-      };
-    }
-
     const verifiedChannels = await getVerifiedPlayableSportsChannels(
       appLiveChannels,
       forceRefresh
     );
 
+    if (!cfg.rapidApiKey) {
+      const fallback = getCachedOrPublicFixtures(verifiedChannels);
+      return {
+        events: fallback.events,
+        verifiedChannels,
+        error: fallback.fromCache
+          ? 'Cricbuzz RapidAPI key is not configured. Showing cached cricket fixtures.'
+          : 'Cricbuzz RapidAPI key is not configured. Showing public fixture metadata and verified sports channels.',
+        apiConfigured: false,
+        usingFallback: true,
+      };
+    }
+
     if (
       !forceRefresh &&
       cachedSportsResult &&
-      Date.now() - cachedSportsResult.timestamp < CACHE_TTL_MS
+      Date.now() - cachedSportsResult.timestamp < CACHE_TTL_MS &&
+      cachedSportsResult.events.length > 0
     ) {
       return {
         events: cachedSportsResult.events,
         verifiedChannels,
         error: cachedSportsResult.error,
         apiConfigured: true,
+        usingFallback: false,
       };
     }
 
@@ -620,12 +790,13 @@ export const cricbuzzService = {
     const fetchEndpoint = async (
       path: string,
       endpointType: SportsEventStatus
-    ): Promise<{ items: SportsEvent[]; error?: string }> => {
+    ): Promise<{ items: SportsEvent[]; error?: string; status?: number }> => {
       try {
         const res = await fetch(`${cfg.baseUrl}${path}`, { headers });
         if (!res.ok) {
           return {
             items: [],
+            status: res.status,
             error: `Cricbuzz API ${path} returned HTTP ${res.status}`,
           };
         }
@@ -669,22 +840,36 @@ export const cricbuzzService = {
       return b.startTimeMs - a.startTimeMs;
     });
 
-    const firstError =
-      allEvents.length === 0
-        ? liveRes.error || upcomingRes.error || recentRes.error
-        : undefined;
+    const isAuthFailure = [liveRes.status, upcomingRes.status, recentRes.status].some(
+      (s) => s === 401 || s === 403
+    );
 
-    cachedSportsResult = {
-      timestamp: Date.now(),
-      events: allEvents,
-      error: firstError,
-    };
+    if (allEvents.length > 0) {
+      saveCachedFixtures(allEvents);
+      cachedSportsResult = {
+        timestamp: Date.now(),
+        events: allEvents,
+      };
+      return {
+        events: allEvents,
+        verifiedChannels,
+        apiConfigured: true,
+        usingFallback: false,
+      };
+    }
+
+    const firstError = liveRes.error || upcomingRes.error || recentRes.error;
+    const fallback = getCachedOrPublicFixtures(verifiedChannels);
 
     return {
-      events: allEvents,
+      events: fallback.events,
       verifiedChannels,
-      error: firstError,
-      apiConfigured: true,
+      error: isAuthFailure
+        ? 'Cricbuzz RapidAPI key was rejected (HTTP 401/403). Add a valid key or continue using cached/public fixtures.'
+        : firstError || 'Unable to load live Cricbuzz fixtures right now. Showing cached/public schedule.',
+      apiConfigured: !isAuthFailure,
+      usingFallback: true,
+      authError: isAuthFailure,
     };
   },
 

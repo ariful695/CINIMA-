@@ -122,7 +122,79 @@ export const cloudStreamProviderResolver = {
       s.url.includes('/api/torrent/stream') || (s.seeders !== undefined && s.seeders > 0);
     const isHls = (s: StreamSource) => s.format === 'hls' || s.url.includes('.m3u8');
 
-    const cappedPlugins = downloadedPlugins.slice(0, 36);
+    const isHindiPluginName = (lower: string): boolean =>
+      lower.includes('hindi') ||
+      lower.includes('desi') ||
+      lower.includes('bolly') ||
+      lower.includes('hdhub') ||
+      lower.includes('multimovies') ||
+      lower.includes('hindmovie') ||
+      lower.includes('hdmovie2') ||
+      lower.includes('moviesmod') ||
+      lower.includes('4khdhub') ||
+      lower.includes('fourkhd') ||
+      lower.includes('filmy') ||
+      lower.includes('movierulz') ||
+      lower.includes('movies4u') ||
+      lower.includes('allmovieland') ||
+      lower.includes('moviebox') ||
+      lower.includes('dudefilms') ||
+      lower.includes('vegamovies') ||
+      lower.includes('katmovie') ||
+      lower.includes('netmirror') ||
+      lower.includes('mkvcinemas') ||
+      lower.includes('uwatchfree') ||
+      lower.includes('9kmovies') ||
+      lower.includes('themoviesflix') ||
+      lower.includes('cinestream') ||
+      lower.includes('moviesdrive') ||
+      lower.includes('zinkmovies') ||
+      lower.includes('xdmovies') ||
+      lower.includes('toonhub') ||
+      lower.includes('toonstream') ||
+      lower.includes('animesalt') ||
+      lower.includes('animedekho') ||
+      lower.includes('animeworld') ||
+      lower.includes('doflix') ||
+      lower.includes('dooflix') ||
+      lower.includes('castle') ||
+      lower.includes('cricify') ||
+      lower.includes('pikashow') ||
+      lower.includes('streamflix') ||
+      lower.includes('mp4moviez') ||
+      lower.includes('fullymaza') ||
+      lower.includes('movipk') ||
+      lower.includes('watchmoviespk') ||
+      lower.includes('onlinemovieshindi') ||
+      lower.includes('moviezwap') ||
+      lower.includes('fibwatch') ||
+      lower.includes('cinemacity') ||
+      lower.includes('movieblast') ||
+      lower.includes('topcartoons') ||
+      lower.includes('uhdmovies') ||
+      lower.includes('istreamflare') ||
+      lower.includes('ringz') ||
+      lower.includes('dorabash') ||
+      lower.includes('xon') ||
+      lower.includes('desiserials') ||
+      lower.includes('cinevood') ||
+      lower.includes('einthusan') ||
+      lower.includes('desicinemas') ||
+      lower.includes('filmycab') ||
+      lower.includes('filmyfiy') ||
+      lower.includes('fivemovierulz');
+
+    const hasHindiCandidates = allPlayable.some((s) => isHindi(s) || isDualHindi(s));
+    const preferHindi = params.originalLanguage === 'hi' || hasHindiCandidates;
+
+    const sortedPlugins = preferHindi
+      ? [
+          ...downloadedPlugins.filter((p) => isHindiPluginName(p.toLowerCase())),
+          ...downloadedPlugins.filter((p) => !isHindiPluginName(p.toLowerCase())),
+        ]
+      : downloadedPlugins;
+
+    const cappedPlugins = sortedPlugins.slice(0, 80);
     for (const pluginName of cappedPlugins) {
       const lower = pluginName.toLowerCase();
       let matchedCandidate: StreamSource | null = null;
@@ -131,17 +203,12 @@ export const cloudStreamProviderResolver = {
         matchedCandidate = pickCandidate(isTamil, allPlayable);
       } else if (lower.includes('telugu')) {
         matchedCandidate = pickCandidate(isTelugu, allPlayable);
-      } else if (
-        lower.includes('multimovies') ||
-        lower.includes('desiflix') ||
-        lower.includes('filmy') ||
-        lower.includes('hdhub4u') ||
-        lower.includes('desicinemas') ||
-        lower.includes('hindmoviez')
-      ) {
+      } else if (isHindiPluginName(lower)) {
         matchedCandidate =
           pickCandidate(isHindi, allPlayable) ||
-          pickCandidate(isDualHindi, allPlayable);
+          pickCandidate(isDualHindi, allPlayable) ||
+          pickCandidate((s) => !isP2P(s)) ||
+          pickCandidate((s) => isHls(s));
       } else if (
         lower.includes('superstream') ||
         lower.includes('streamplay') ||
@@ -180,7 +247,7 @@ export const cloudStreamProviderResolver = {
 
       if (matchedCandidate) {
         const langKey = (matchedCandidate.audioLanguage || '').trim().toLowerCase();
-        const dedupeKey = `${matchedCandidate.url}::${langKey}`;
+        const dedupeKey = `${pluginName.toLowerCase()}::${matchedCandidate.url}::${langKey}`;
         if (seenDedupeKeys.has(dedupeKey)) {
           continue;
         }

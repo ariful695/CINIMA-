@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">EUTHOPIAR</string>
+    <string name="title_activity_main">EUTHOPIAR</string>
+    <string name="package_name">com.euthopiar.app</string>
+    <string name="custom_url_scheme">com.euthopiar.app</string>
+</resources>

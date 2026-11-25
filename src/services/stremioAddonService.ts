@@ -60,6 +60,26 @@ export const POPULAR_STREMIO_PRESETS: Array<{
     manifestUrl: 'https://mediafusion.elfhosted.com/manifest.json',
     description: 'Universal regional, Hindi, Tamil, Telugu & English stream index',
   },
+  {
+    name: 'CNCVerse Bridge (Hindi & Multi)',
+    manifestUrl: 'https://bridge.cncverse.com/stremio/manifest.json',
+    description: 'High-availability Hindi, Bollywood & Dual-Audio streams',
+  },
+  {
+    name: 'Flix Free (Hindi & Multi)',
+    manifestUrl: 'https://flixfree.vercel.app/manifest.json',
+    description: 'Hindi dubbed movies and Bollywood series streams',
+  },
+  {
+    name: 'Comet FeelsLegal (Hindi & Multi)',
+    manifestUrl: 'https://comet.feelslegal.com/manifest.json',
+    description: 'Fast multi-quality P2P and web streams including Hindi & Dual-Audio',
+  },
+  {
+    name: 'PlavioHD (Direct HD Movies & Series)',
+    manifestUrl: 'https://hd.plavio.site/manifest.json',
+    description: 'Direct HTTPS HD movies, series and live streams',
+  },
 ];
 
 export interface StremioResolveParams {
@@ -133,7 +153,7 @@ export function extractAudioLanguages(text: string): string[] {
     if (lang && !found.includes(lang)) found.push(lang);
   };
 
-  if (/\bhindi\b|\[hin\]|\(hin\)/i.test(text)) add('Hindi');
+  if (/\b(hindi|hin|hi|bolly|bollywood|hindustani)\b|\[hin(?:di)?\]|\(hin(?:di)?\)|hin[\s._+-]+eng|eng[\s._+-]+hin|dual[-\s+_/]audio.*hin|hin.*dual|🇮🇳/i.test(text)) add('Hindi');
   if (/\b(bengali|bangla)\b|\[ben\]|\(ben\)|🇧🇩/i.test(text)) add('Bengali');
   if (/\btamil\b|\[tam\]|\(tam\)/i.test(text)) add('Tamil');
   if (/\btelugu\b|\[tel\]|\(tel\)/i.test(text)) add('Telugu');
@@ -186,7 +206,10 @@ const STREMIO_NOISE_WORDS = new Set([
 ]);
 
 function tokenizeForMatch(text: string): string[] {
-  return text
+  const normalized = text
+    .replace(/(?<=\b[a-zA-Z])\.(?=[a-zA-Z]\b)/g, '')
+    .replace(/\b([a-zA-Z])\.(?=\s|$)/g, '$1');
+  return normalized
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, ' ')
     .split(/\s+/)
@@ -224,7 +247,7 @@ function isStremioStreamRelevant(
     const epMatch =
       rawText.match(/\bS(\d{1,2})[.\s_-]*E(\d{1,2})\b/i) ||
       rawText.match(/\b(\d{1,2})x(\d{2})\b/i) ||
-      rawText.match(/\bSeason\s*(\d{1,2})\b[\s,._-]*Episode\s*(\d{1,2})\b/i);
+      rawText.match(/\bSeason[.\s_-]*(\d{1,2})[.\s_-]*Episode[.\s_-]*(\d{1,2})\b/i);
     if (epMatch) {
       const sNum = parseInt(epMatch[1], 10);
       const eNum = parseInt(epMatch[2], 10);
@@ -271,14 +294,36 @@ function isStremioStreamRelevant(
       'original',
     ]);
     const candidateTokens = tokenizeForMatch(firstLine).filter((t) => !addonTokens.has(t));
-    if (expectedTokens.length >= 2 && candidateTokens.length >= 2) {
-      const matchedCount = expectedTokens.filter((et) =>
-        candidateTokens.some(
-          (ct) => ct === et || (et.length >= 4 && ct.length >= 4 && (ct.includes(et) || et.includes(ct)))
+    const hasHindiOrIndicTag =
+      /\b(hindi|hin|hi|bolly|bollywood|hindustani|desiflix|hindmoviez)\b|\[hin(?:di)?\]|\(hin(?:di)?\)|[\u0900-\u097F\u0980-\u09FF]|🇮🇳/i.test(
+        rawText
+      );
+    const releaseYearMatches = Boolean(
+      params.releaseYear &&
+        new RegExp(`\\b(${params.releaseYear - 1}|${params.releaseYear}|${params.releaseYear + 1})\\b`).test(
+          firstLine
         )
+    );
+    if (expectedTokens.length >= 2 && candidateTokens.length >= 2) {
+      const expectedJoined = expectedTokens.join('');
+      const candidateJoined = candidateTokens.join('');
+      const matchedCount = expectedTokens.filter(
+        (et) =>
+          candidateTokens.some(
+            (ct) => ct === et || (et.length >= 4 && ct.length >= 4 && (ct.includes(et) || et.includes(ct)))
+          ) || (et.length >= 3 && candidateJoined.includes(et))
       ).length;
-      const minNeeded = Math.max(1, Math.floor(expectedTokens.length * 0.35));
-      if (matchedCount < minNeeded) return false;
+      const joinedMatch =
+        expectedJoined.length >= 6 &&
+        (candidateJoined.includes(expectedJoined) || expectedJoined.includes(candidateJoined));
+      const minNeeded = 1;
+      if (
+        matchedCount < minNeeded &&
+        !joinedMatch &&
+        !(hasHindiOrIndicTag && (!hasExplicitFilenameOrYear || releaseYearMatches))
+      ) {
+        return false;
+      }
     }
   }
 
@@ -446,6 +491,7 @@ export const stremioAddonService = {
         if (m.includes('peerflix.mov') && toggles.peerflix === false) return false;
         if (m.includes('pipe.boringways') && toggles.pipe === false) return false;
         if ((m.includes('icv.stremio-italia') || m.includes('ilcorsaroviola')) && toggles.icv === false) return false;
+        if (m.includes('plavio.site') && toggles.plaviohd === false) return false;
         return a.baseUrl.startsWith('http://') || a.baseUrl.startsWith('https://');
       });
     if (addons.length === 0) return [];
@@ -471,6 +517,23 @@ export const stremioAddonService = {
           // Ignore server fallback failure
         }
       }
+      if (!targetImdbId && params.title) {
+        try {
+          const cinemetaType = params.mediaType === 'tv' ? 'series' : 'movie';
+          const cRes = await fetch(
+            `https://v3-cinemeta.strem.io/catalog/${cinemetaType}/top/search=${encodeURIComponent(params.title)}.json`
+          );
+          if (cRes.ok) {
+            const cJson = (await cRes.json()) as { metas?: Array<{ id?: string; imdb_id?: string }> };
+            const foundId = cJson.metas?.[0]?.imdb_id || cJson.metas?.[0]?.id;
+            if (foundId && /^tt\d+$/i.test(foundId)) {
+              targetImdbId = foundId;
+            }
+          }
+        } catch {
+          // Ignore
+        }
+      }
     }
 
     const baseId =
@@ -493,23 +556,27 @@ export const stremioAddonService = {
     const sources: StreamSource[] = [];
 
     const fetchAddonJson = async (endpointUrl: string): Promise<StremioStreamResponse | null> => {
-      const controller = new AbortController();
-      const timerFn = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
-      const clearTimerFn = typeof window !== 'undefined' ? window.clearTimeout : clearTimeout;
-      const timeout = timerFn(() => controller.abort(), 7500);
-      try {
-        const res = await fetch(`/api/proxy?url=${encodeURIComponent(endpointUrl)}`, {
-          signal: controller.signal,
-        });
-        if (!res.ok) return null;
-        const text = await res.text();
-        if (!text.trim().startsWith('{')) return null;
-        return JSON.parse(text) as StremioStreamResponse;
-      } catch {
-        return null;
-      } finally {
-        clearTimerFn(timeout);
-      }
+      const tryUrl = async (target: string): Promise<StremioStreamResponse | null> => {
+        const controller = new AbortController();
+        const timerFn = typeof window !== 'undefined' ? window.setTimeout : setTimeout;
+        const clearTimerFn = typeof window !== 'undefined' ? window.clearTimeout : clearTimeout;
+        const timeout = timerFn(() => controller.abort(), 7500);
+        try {
+          const res = await fetch(target, { signal: controller.signal });
+          if (!res.ok) return null;
+          const text = await res.text();
+          return text.trim().startsWith('{') ? (JSON.parse(text) as StremioStreamResponse) : null;
+        } catch {
+          return null;
+        } finally {
+          clearTimerFn(timeout);
+        }
+      };
+
+      return (
+        (await tryUrl(`/api/proxy?url=${encodeURIComponent(endpointUrl)}`)) ||
+        (await tryUrl(endpointUrl))
+      );
     };
 
     await Promise.allSettled(
@@ -568,31 +635,45 @@ export const stremioAddonService = {
             const directMediaExtUrl =
               s.externalUrl && /\.(mp4|m3u8|webm)(\?|$)/i.test(s.externalUrl) ? s.externalUrl : undefined;
             const streamUrl = s.url || directMediaExtUrl;
-            // Reject HTML redirect/captcha pages masquerading as stream URLs
-            if (streamUrl && /\/redirect\?p=/i.test(streamUrl)) {
+            // Reject HTML redirect/captcha/file-host landing pages masquerading as direct stream URLs
+            if (
+              streamUrl &&
+              (/\/redirect\?p=/i.test(streamUrl) ||
+                (/\b(hubcloud\.mov|hubdrive\.|gdflix\.|vcloud\.|filepress\.|photolinx\.)/i.test(streamUrl) &&
+                  !/\.(mp4|mkv|webm|m3u8)(\?|$)/i.test(streamUrl)))
+            ) {
               return;
             }
             if (streamUrl && (streamUrl.startsWith('http://') || streamUrl.startsWith('https://'))) {
               const title = s.title || s.name || s.description || `${addon.name} Stream ${idx + 1}`;
-              const isHls = streamUrl.toLowerCase().includes('.m3u8') || rawText.toUpperCase().includes('HLS');
+              const lowerUrl = streamUrl.toLowerCase();
+              const isHls =
+                lowerUrl.includes('.m3u8') ||
+                rawText.toUpperCase().includes('HLS') ||
+                rawText.toUpperCase().includes('M3U8') ||
+                /nxstreamhub\.workers\.dev\/stream\//i.test(lowerUrl);
               const filenameHint = s.behaviorHints?.filename || '';
               const isMkvOrUnsupported =
                 !isHls &&
-                (streamUrl.toLowerCase().includes('.mkv') ||
+                (lowerUrl.includes('.mkv') ||
                   filenameHint.toLowerCase().includes('.mkv') ||
+                  s.behaviorHints?.notWebReady === true ||
                   /\b(\.mkv|x265|hevc|10bit|dts|truehd|ddp|eac3|remux)\b/i.test(rawText));
               const isHevc = /\b(x265|hevc|10bit)\b/i.test(rawText);
 
-              if (isMkvOrUnsupported && sizeGb !== undefined && sizeGb > 12) {
+              const maxAllowedGb = /\b(hindi|hin|hi|dual|multi)\b|🇮🇳/i.test(rawText) ? 35 : 12;
+              if (isMkvOrUnsupported && sizeGb !== undefined && sizeGb > maxAllowedGb) {
                 return;
               }
 
               // BUG-11: Keep HLS dual-audio as one single Dual item; remux non-HLS multi-audio per track consistently
               if (isHls && languages.length > 1) {
                 const dualLabel = `Dual (${languages.join(' / ')})`;
-                const finalUrl = encodedHeaders
-                  ? `/api/stream-proxy?url=${encodeURIComponent(streamUrl)}&h=${encodeURIComponent(encodedHeaders)}`
-                  : streamUrl;
+                const finalUrl = streamUrl.startsWith('/api/')
+                  ? streamUrl
+                  : `/api/stream-proxy?url=${encodeURIComponent(streamUrl)}${
+                      encodedHeaders ? `&h=${encodeURIComponent(encodedHeaders)}` : ''
+                    }`;
                 addonCollected.push({
                   id: `stremio-${addon.id}-${idx}-dual`,
                   providerName: addon.name,
@@ -609,13 +690,19 @@ export const stremioAddonService = {
                   isVerified: !s.behaviorHints?.notWebReady,
                 });
               } else {
+                const isMultiLang = languages.length > 1;
                 languages.forEach((singleLang, langIdx) => {
-                  const needsRemuxForTrack = isMkvOrUnsupported || (!isHls && languages.length > 1);
-                  const needsProxy = needsRemuxForTrack || Boolean(encodedHeaders);
+                  const needsRemuxForTrack = isMkvOrUnsupported || (!isHls && isMultiLang);
+                  const needsProxy =
+                    needsRemuxForTrack || Boolean(encodedHeaders) || !streamUrl.startsWith('/api/');
+                  const remuxLangQuery =
+                    isMultiLang && singleLang && !/^(original|multi|dual)$/i.test(singleLang)
+                      ? `&lang=${encodeURIComponent(singleLang)}`
+                      : '';
                   const finalUrl = needsProxy
                     ? `/api/stream-proxy?url=${encodeURIComponent(streamUrl)}${
                         encodedHeaders ? `&h=${encodeURIComponent(encodedHeaders)}` : ''
-                      }${needsRemuxForTrack ? `&remux=1${isHevc ? '&hevc=1' : ''}&lang=${encodeURIComponent(singleLang)}` : ''}`
+                      }${needsRemuxForTrack ? `&remux=1${isHevc ? '&hevc=1' : ''}${remuxLangQuery}` : ''}`
                     : streamUrl;
 
                   addonCollected.push({
@@ -686,12 +773,16 @@ export const stremioAddonService = {
             }
           });
 
+          const isHindiOrDual = (item: StreamSource) =>
+            /\b(hindi|hin|hi)\b|🇮🇳/i.test(`${item.audioLanguage || ''} ${item.label}`);
+
           const hasLighter = addonCollected.some((item) => {
             const gbMatch = item.sizeLabel?.match(/^([\d.]+)GB$/i);
             return !gbMatch || parseFloat(gbMatch[1]) <= 8;
           });
           const filtered = hasLighter
             ? addonCollected.filter((item) => {
+                if (isHindiOrDual(item)) return true; // Never drop Hindi/Dual-Audio streams due to file size
                 const gbMatch = item.sizeLabel?.match(/^([\d.]+)GB$/i);
                 return !gbMatch || parseFloat(gbMatch[1]) <= 8;
               })
@@ -710,7 +801,7 @@ export const stremioAddonService = {
           for (const item of filtered) {
             const langKey = (item.audioLanguage || 'Original').toLowerCase();
             const count = perLangCount.get(langKey) || 0;
-            if (count < 5 && balanced.length < 24) {
+            if (count < 12 && balanced.length < 60) {
               perLangCount.set(langKey, count + 1);
               balanced.push(item);
             }

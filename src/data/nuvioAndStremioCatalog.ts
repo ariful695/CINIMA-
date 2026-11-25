@@ -2237,13 +2237,112 @@ export const NUVIO_PLUGIN_REPOS: NuvioDirectoryRepo[] = [
       "en"
     ],
     "manifestUrl": "https://raw.githubusercontent.com/D3adlyRocket/Hindi-Nuvio/refs/heads/main/manifest.json",
-    "plugins": []
+    "plugins": [
+      {
+        "id": "hindi-nuvio-4khdhub",
+        "name": "4KHDHub",
+        "description": "Direct high-bitrate Hindi & Dual-Audio mirrors.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-allmovieland",
+        "name": "AllMovieLand",
+        "description": "Hindi & Multi-language Bollywood and Hollywood dubbed streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-cinemacity",
+        "name": "CinemaCity",
+        "description": "Fast Hindi web series and latest movie mirrors.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-cinestream",
+        "name": "CineStream",
+        "description": "Direct Hindi & Bollywood stream index.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "hindi-nuvio-flixindia",
+        "name": "FlixIndia",
+        "description": "Indian OTT & Bollywood high speed streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "hindi-nuvio-hindmoviez",
+        "name": "HindMoviez",
+        "description": "Direct Hindi movies and dual-audio collections.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-hdmovie2",
+        "name": "HDMovie2",
+        "description": "High resolution Hindi movies & web series.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-moviebox",
+        "name": "MovieBox",
+        "description": "Hindi, Dual-Audio & HD direct mirrors.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-movieblast",
+        "name": "MovieBlast",
+        "description": "High-bitrate Bollywood & Hindi dubbed releases.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-moviesdrive",
+        "name": "MoviesDrive",
+        "description": "Ultra fast Google Drive & Cloud Hindi links.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-movies4u",
+        "name": "Movies4U",
+        "description": "Hindi & multi-audio movies and series.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-netmirror",
+        "name": "NetMirror",
+        "description": "Fast Hindi & Multi-Audio OTT HLS streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-streamflix",
+        "name": "StreamFlix",
+        "description": "Direct Hindi API streams with high reliability.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "hindi-nuvio-vegamovies",
+        "name": "VegaMovies",
+        "description": "Top Hindi & Dual-Audio direct cloud mirrors.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      }
+    ]
   },
   {
     "id": "nuvio-cb-providers",
     "name": "CB-Providers",
     "author": "SA7ANI",
-    "description": "Verified Hindi & multi-audio OTT scrapers (NetMirror, Castle, MovieBox, DesiFlix).",
+    "description": "Verified Hindi & multi-audio OTT scrapers (NetMirror, Castle, MovieBox, DesiFlix, VegaMovies, MoviesDrive).",
     "tags": [
       "Hindi",
       "Multi language"
@@ -2257,11 +2356,244 @@ export const NUVIO_PLUGIN_REPOS: NuvioDirectoryRepo[] = [
       "en"
     ],
     "manifestUrl": "https://raw.githubusercontent.com/SA7ANI/cb-providers/main/manifest.json",
-    "plugins": []
+    "plugins": [
+      {
+        "id": "cb-moviesdrive",
+        "name": "MoviesDrive",
+        "description": "Direct Hindi & Dual-Audio high speed streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-4khdhub",
+        "name": "4KHDHub",
+        "description": "Direct 4K and 1080p Hindi mirrors.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-hdhub4u",
+        "name": "HDHub4u",
+        "description": "Hindi dubbed & Bollywood movies in 1080p/4K.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-vegamovies",
+        "name": "VegaMovies",
+        "description": "Hindi & Dual-Audio direct cloud streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-castle",
+        "name": "Castle",
+        "description": "Hindi dubbed & English direct MP4/HLS streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-desiflix",
+        "name": "DesiFlix",
+        "description": "Dedicated Hindi & Bollywood movie and series scraper.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "cb-moviebox",
+        "name": "MovieBox",
+        "description": "Hindi, Dual-Audio & HD direct mirrors.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-moviesmod",
+        "name": "MoviesMod",
+        "description": "Hindi movies and web series with multiple quality options.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-playimdb",
+        "name": "PlayIMDb",
+        "description": "Hindi & Indian regional streaming mirrors.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-netmirror",
+        "name": "NetMirror",
+        "description": "Fast Hindi & Multi-Audio OTT HLS streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-multimovies",
+        "name": "MultiMovies",
+        "description": "Hindi, Dual-Audio & South Indian Hindi dubbed streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-toonstream",
+        "name": "ToonStream",
+        "description": "Hindi cartoons, anime & animated series.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "cb-puretoons",
+        "name": "PureToons",
+        "description": "Hindi dubbed classic & modern animated shows.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "cb-einthusan",
+        "name": "Einthusan",
+        "description": "Premium South Indian & Hindi high quality cinema.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "ta", "te"]
+      },
+      {
+        "id": "cb-animeworld",
+        "name": "AnimeWorld",
+        "description": "Hindi dubbed anime and animated features.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "ja"]
+      },
+      {
+        "id": "cb-animesalt",
+        "name": "AnimeSalt",
+        "description": "Hindi dub and sub anime streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "ja"]
+      },
+      {
+        "id": "cb-cinecity",
+        "name": "CineCity",
+        "description": "Latest Bollywood movies and regional content.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "cb-movieblast",
+        "name": "MovieBlast",
+        "description": "Bollywood & Dual-Audio high speed releases.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-allmovieland",
+        "name": "AllMovieLand",
+        "description": "Hindi & Hollywood dubbed full HD streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-streamflix",
+        "name": "StreamFlix",
+        "description": "Direct Hindi streaming endpoints.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-hindmoviez",
+        "name": "HindMoviez",
+        "description": "Hindi dubbed films and series.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "cb-topcartoons",
+        "name": "TopCartoons",
+        "description": "Hindi dubbed cartoon episodes and movies.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "cb-uhdmovies",
+        "name": "UHDMovies",
+        "description": "Ultra HD Hindi & multi-audio streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-fibwatch",
+        "name": "FibWatch",
+        "description": "Hindi & Indian regional cinema mirrors.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "cb-hdghartv",
+        "name": "HDGharTV",
+        "description": "Hindi television serials and movie streams.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "cb-gramcinema",
+        "name": "GramCinema",
+        "description": "Hindi & desi movie releases.",
+        "types": ["movie", "tv"],
+        "languages": ["hi"]
+      },
+      {
+        "id": "cb-ctgmovies",
+        "name": "CTGMovies",
+        "description": "Hindi dubbed Hollywood & Bollywood cinema.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      },
+      {
+        "id": "cb-peachify",
+        "name": "Peachify",
+        "description": "Fast multi-quality Hindi streaming mirrors.",
+        "types": ["movie", "tv"],
+        "languages": ["hi", "en"]
+      }
+    ]
   }
 ];
 
 export const STREMIO_ADDONS_NET_DIRECTORY: StremioNetDirectoryAddon[] = [
+  {
+    "id": "stremionet-cncverse-bridge",
+    "slug": "cncverse-bridge",
+    "name": "CNCVerse Bridge (Hindi & Multi)",
+    "manifestUrl": "https://bridge.cncverse.com/stremio/manifest.json",
+    "description": "High-availability Hindi, Bollywood, Dual-Audio & Indian regional movie and series streams from CNCVerse.",
+    "logo": "https://cncverse.com/icon.png",
+    "category": "Hindi & Regional"
+  },
+  {
+    "id": "stremionet-flix-free",
+    "slug": "flix-free",
+    "name": "Flix Free (Hindi Dubbed & Multi)",
+    "manifestUrl": "https://flixfree.vercel.app/manifest.json",
+    "description": "Free Hindi dubbed movies, Bollywood blockbusters, and dual-audio web series streams.",
+    "logo": "https://flixfree.vercel.app/logo.png",
+    "category": "Hindi & Regional"
+  },
+  {
+    "id": "stremionet-mediafusion-hindi",
+    "slug": "mediafusion-hindi",
+    "name": "MediaFusion (Hindi & Multi-Audio)",
+    "manifestUrl": "https://mediafusion.elfhosted.com/manifest.json",
+    "description": "Universal Hindi, Bollywood, Tamil, Telugu, Malayalam & English multi-quality stream aggregator.",
+    "logo": "https://mediafusion.elfhosted.com/static/logo.png",
+    "category": "Hindi & Regional"
+  },
+  {
+    "id": "stremionet-comet-feelslegal",
+    "slug": "comet-feelslegal",
+    "name": "Comet FeelsLegal (Hindi & Multi)",
+    "manifestUrl": "https://comet.feelslegal.com/manifest.json",
+    "description": "High-speed multi-quality P2P and web streams including Hindi, Dual-Audio and regional releases.",
+    "logo": "https://comet.feelslegal.com/logo.png",
+    "category": "Hindi & Regional"
+  },
   {
     "id": "stremionet-ratings-aggregator",
     "slug": "ratings-aggregator",
@@ -2618,9 +2950,9 @@ export const STREMIO_ADDONS_NET_DIRECTORY: StremioNetDirectoryAddon[] = [
     "slug": "hdhub",
     "name": "HdHub",
     "manifestUrl": "https://hdhub.thevolecitor.qzz.io/eyJ0b3Jib3giOiJ1bnNldCIsInF1YWxpdGllcyI6IjIxNjBwLDEwODBwLDcyMHAiLCJzb3J0IjoiZGVzYyJ9/manifest.json",
-    "description": "Watch movies and series from HdHub.",
+    "description": "Watch Hindi, Dual-Audio & multi-language movies and series from HdHub.",
     "logo": "http://hdhub.thevolecitor.qzz.io/logo.png",
-    "category": "Streams"
+    "category": "Hindi & Regional"
   },
   {
     "id": "stremionet-hianime-streams",
