@@ -194,12 +194,20 @@ export const liveTvAddonService = {
           const cleanBase = rawBase.replace(/\/manifest\.json$/i, '').replace(/\/+$/, '');
           const qSuffix = queryPart ? `?${queryPart}` : '';
 
-          const tvCatalogs = (manifest.catalogs || [])
-            .filter((c) => c.type === 'tv' || c.type === 'channel')
-            .slice(0, 3);
+          const rawCatalogs = manifest.catalogs || [];
+          const tvCatalogs = rawCatalogs.filter(
+            (c) =>
+              c.type === 'tv' ||
+              c.type === 'channel' ||
+              c.type === 'other' ||
+              c.type === 'live' ||
+              c.type === 'sports'
+          );
+          const targetCatalogs = (tvCatalogs.length > 0 ? tvCatalogs : rawCatalogs).slice(0, 4);
 
-          for (const cat of tvCatalogs) {
-            const catUrl = `${cleanBase}/catalog/${cat.type}/${encodeURIComponent(cat.id)}.json${qSuffix}`;
+          for (const cat of targetCatalogs) {
+            const catType = cat.type || 'tv';
+            const catUrl = `${cleanBase}/catalog/${catType}/${encodeURIComponent(cat.id)}.json${qSuffix}`;
             const catData = await fetchJson<{
               metas?: Array<{
                 id?: string;
@@ -208,23 +216,36 @@ export const liveTvAddonService = {
                 logo?: string;
                 genres?: string[];
                 country?: string;
+                behaviorHints?: { videoOriginalUrl?: string };
+                streamUrl?: string;
+                url?: string;
+                streams?: Array<{ url?: string }>;
               }>;
-            }>(catUrl, 5500);
-            const metas = (catData?.metas || []).slice(0, 24);
+            }>(catUrl, 6000);
+            const metas = (catData?.metas || []).slice(0, 40);
             await Promise.allSettled(
               metas.map(async (meta) => {
                 if (!meta.id || !meta.name) return;
-                const streamEndpoint = `${cleanBase}/stream/${cat.type}/${encodeURIComponent(meta.id)}.json${qSuffix}`;
-                const streamData = await fetchJson<{
-                  streams?: Array<{ url?: string }>;
-                }>(streamEndpoint, 4500);
-                const streamUrl = streamData?.streams?.find((s) => s.url?.startsWith('http'))?.url;
+                let streamUrl =
+                  meta.behaviorHints?.videoOriginalUrl ||
+                  meta.streamUrl ||
+                  meta.url ||
+                  meta.streams?.[0]?.url;
+
+                if (!streamUrl) {
+                  const streamEndpoint = `${cleanBase}/stream/${catType}/${encodeURIComponent(meta.id)}.json${qSuffix}`;
+                  const streamData = await fetchJson<{
+                    streams?: Array<{ url?: string }>;
+                  }>(streamEndpoint, 4500);
+                  streamUrl = streamData?.streams?.find((s) => s.url?.startsWith('http'))?.url;
+                }
+
                 if (!streamUrl || seenUrls.has(streamUrl)) return;
                 seenUrls.add(streamUrl);
                 channels.push({
                   id: `stremio-${addon.id}-${meta.id}`,
                   name: meta.name,
-                  group: meta.genres?.[0] || cat.name || 'Entertainment',
+                  group: meta.genres?.[0] || cat.name || 'Live TV',
                   logo: meta.logo || meta.poster,
                   streamUrl,
                   playlistId: addon.id,

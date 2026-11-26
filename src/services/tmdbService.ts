@@ -225,7 +225,19 @@ export const tmdbService = {
   },
 
   async getGenres(): Promise<Genre[]> {
+    return this.getGenresByType('all');
+  },
+
+  async getGenresByType(type: 'all' | 'movie' | 'tv' = 'all'): Promise<Genre[]> {
     try {
+      if (type === 'movie') {
+        const res = await tmdbFetch<{ genres: Genre[] }>('/genre/movie/list');
+        return res.genres || TMDB_GENRES;
+      }
+      if (type === 'tv') {
+        const res = await tmdbFetch<{ genres: Genre[] }>('/genre/tv/list');
+        return res.genres || TMDB_GENRES;
+      }
       const [movieGenres, tvGenres] = await Promise.all([
         tmdbFetch<{ genres: Genre[] }>('/genre/movie/list'),
         tmdbFetch<{ genres: Genre[] }>('/genre/tv/list'),
@@ -234,7 +246,7 @@ export const tmdbService = {
       for (const g of [...movieGenres.genres, ...tvGenres.genres]) {
         map.set(g.id, g);
       }
-      return Array.from(map.values()).slice(0, 14);
+      return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
     } catch {
       return TMDB_GENRES;
     }
@@ -269,26 +281,106 @@ export const tmdbService = {
     return tagCuratedFallback([...CURATED_MOVIES.slice(0, 6), ...CURATED_SERIES.slice(0, 6)]);
   },
 
-  async discoverFiltered(options: {
+  async discoverCatalog(options: {
     type: 'all' | 'movie' | 'tv';
     genreId?: number | null;
     year?: string | null;
-  }): Promise<MediaItem[]> {
-    const { type, genreId, year } = options;
+    country?: string | null;
+    language?: string | null;
+    languageMode?: 'all' | 'audio' | 'subtitle';
+    sortBy?: 'popular' | 'rating' | 'newest';
+    page?: number;
+  }): Promise<{
+    items: MediaItem[];
+    page: number;
+    totalPages: number;
+    isLive: boolean;
+  }> {
+    const {
+      type,
+      genreId,
+      year,
+      country,
+      language,
+      languageMode = 'all',
+      sortBy = 'popular',
+      page = 1,
+    } = options;
+
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const movieSort =
+      sortBy === 'rating'
+        ? 'vote_average.desc'
+        : sortBy === 'newest'
+        ? 'primary_release_date.desc'
+        : 'popularity.desc';
+    const tvSort =
+      sortBy === 'rating'
+        ? 'vote_average.desc'
+        : sortBy === 'newest'
+        ? 'first_air_date.desc'
+        : 'popularity.desc';
+
     const baseMovieParams: Record<string, string | number> = {
-      sort_by: 'popularity.desc',
+      sort_by: movieSort,
+      page,
     };
     const baseTvParams: Record<string, string | number> = {
-      sort_by: 'popularity.desc',
+      sort_by: tvSort,
+      page,
+    };
+
+    if (sortBy === 'rating') {
+      baseMovieParams['vote_count.gte'] = 120;
+      baseTvParams['vote_count.gte'] = 80;
+    } else if (sortBy === 'newest' && (!year || year === 'all')) {
+      baseMovieParams['primary_release_date.lte'] = todayIso;
+      baseTvParams['first_air_date.lte'] = todayIso;
+      baseMovieParams['vote_count.gte'] = 5;
+      baseTvParams['vote_count.gte'] = 5;
+    }
+
+    // Cross-map movie-only / tv-only genre IDs when browsing "All" types simultaneously
+    const MOVIE_TO_TV_GENRE: Record<number, number> = {
+      28: 10759,
+      12: 10759,
+      14: 10765,
+      878: 10765,
+      10752: 10768,
+    };
+    const TV_TO_MOVIE_GENRE: Record<number, number> = {
+      10759: 28,
+      10765: 878,
+      10768: 10752,
     };
 
     if (genreId) {
-      baseMovieParams.with_genres = genreId;
-      baseTvParams.with_genres = genreId;
+      baseMovieParams.with_genres = TV_TO_MOVIE_GENRE[genreId] ?? genreId;
+      baseTvParams.with_genres = MOVIE_TO_TV_GENRE[genreId] ?? genreId;
     }
 
-    if (year) {
-      if (year === '2010s') {
+    if (country && country !== 'all') {
+      baseMovieParams.with_origin_country = country.toUpperCase();
+      baseTvParams.with_origin_country = country.toUpperCase();
+    }
+
+    if (language && language !== 'all') {
+      if (languageMode === 'subtitle' && language !== 'en') {
+        baseMovieParams.with_spoken_languages = language;
+        baseTvParams.with_spoken_languages = language;
+      } else {
+        baseMovieParams.with_original_language = language;
+        baseTvParams.with_original_language = language;
+      }
+    }
+
+    if (year && year !== 'all') {
+      if (year === '2020s') {
+        baseMovieParams['primary_release_date.gte'] = '2020-01-01';
+        baseMovieParams['primary_release_date.lte'] = '2029-12-31';
+        baseTvParams['first_air_date.gte'] = '2020-01-01';
+        baseTvParams['first_air_date.lte'] = '2029-12-31';
+      } else if (year === '2010s') {
         baseMovieParams['primary_release_date.gte'] = '2010-01-01';
         baseMovieParams['primary_release_date.lte'] = '2019-12-31';
         baseTvParams['first_air_date.gte'] = '2010-01-01';
@@ -298,9 +390,17 @@ export const tmdbService = {
         baseMovieParams['primary_release_date.lte'] = '2009-12-31';
         baseTvParams['first_air_date.gte'] = '2000-01-01';
         baseTvParams['first_air_date.lte'] = '2009-12-31';
+      } else if (year === '1990s') {
+        baseMovieParams['primary_release_date.gte'] = '1990-01-01';
+        baseMovieParams['primary_release_date.lte'] = '1999-12-31';
+        baseTvParams['first_air_date.gte'] = '1990-01-01';
+        baseTvParams['first_air_date.lte'] = '1999-12-31';
       } else if (year === 'Classic') {
         baseMovieParams['primary_release_date.lte'] = '1999-12-31';
         baseTvParams['first_air_date.lte'] = '1999-12-31';
+      } else if (year === 'pre1990') {
+        baseMovieParams['primary_release_date.lte'] = '1989-12-31';
+        baseTvParams['first_air_date.lte'] = '1989-12-31';
       } else {
         baseMovieParams.primary_release_year = year;
         baseTvParams.first_air_date_year = year;
@@ -309,38 +409,85 @@ export const tmdbService = {
 
     try {
       if (type === 'movie') {
-        const data = await tmdbFetch<{ results: TmdbRawMedia[] }>('/discover/movie', baseMovieParams);
-        return data.results.map((r) => mapRawMedia(r, 'movie'));
+        const data = await tmdbFetch<{
+          results: TmdbRawMedia[];
+          page?: number;
+          total_pages?: number;
+        }>('/discover/movie', baseMovieParams);
+        return {
+          items: data.results.map((r) => mapRawMedia(r, 'movie')),
+          page: data.page || page,
+          totalPages: Math.min(data.total_pages || 1, 500),
+          isLive: true,
+        };
       }
       if (type === 'tv') {
-        const data = await tmdbFetch<{ results: TmdbRawMedia[] }>('/discover/tv', baseTvParams);
-        return data.results.map((r) => mapRawMedia(r, 'tv'));
+        const data = await tmdbFetch<{
+          results: TmdbRawMedia[];
+          page?: number;
+          total_pages?: number;
+        }>('/discover/tv', baseTvParams);
+        return {
+          items: data.results.map((r) => mapRawMedia(r, 'tv')),
+          page: data.page || page,
+          totalPages: Math.min(data.total_pages || 1, 500),
+          isLive: true,
+        };
       }
       const [moviesData, tvData] = await Promise.all([
-        tmdbFetch<{ results: TmdbRawMedia[] }>('/discover/movie', baseMovieParams),
-        tmdbFetch<{ results: TmdbRawMedia[] }>('/discover/tv', baseTvParams),
+        tmdbFetch<{ results: TmdbRawMedia[]; total_pages?: number }>('/discover/movie', baseMovieParams),
+        tmdbFetch<{ results: TmdbRawMedia[]; total_pages?: number }>('/discover/tv', baseTvParams),
       ]);
       const combined = [
-        ...moviesData.results.slice(0, 10).map((r) => mapRawMedia(r, 'movie')),
-        ...tvData.results.slice(0, 10).map((r) => mapRawMedia(r, 'tv')),
-      ].sort((a, b) => (b.popularity || 0) - (a.popularity || 0));
-      return combined;
+        ...moviesData.results.slice(0, 12).map((r) => mapRawMedia(r, 'movie')),
+        ...tvData.results.slice(0, 12).map((r) => mapRawMedia(r, 'tv')),
+      ].sort((a, b) => {
+        if (sortBy === 'rating') return b.voteAverage - a.voteAverage;
+        if (sortBy === 'newest') {
+          return String(b.releaseDate ?? '').localeCompare(String(a.releaseDate ?? ''));
+        }
+        return (b.popularity || 0) - (a.popularity || 0);
+      });
+      return {
+        items: combined,
+        page,
+        totalPages: Math.min(Math.max(moviesData.total_pages || 1, tvData.total_pages || 1), 500),
+        isLive: true,
+      };
     } catch {
-      return tagCuratedFallback(
+      const fallback = tagCuratedFallback(
         [...CURATED_MOVIES, ...CURATED_SERIES].filter((item) => {
           if (type !== 'all' && item.mediaType !== type) return false;
           if (genreId && !item.genreIds.includes(genreId)) return false;
-          if (year) {
+          if (language && language !== 'all' && item.originalLanguage !== language) return false;
+          if (year && year !== 'all') {
             const y = parseInt((item.releaseDate || '').slice(0, 4), 10);
+            if (year === '2020s') return y >= 2020 && y <= 2029;
             if (year === '2010s') return y >= 2010 && y <= 2019;
             if (year === '2000s') return y >= 2000 && y <= 2009;
+            if (year === '1990s') return y >= 1990 && y <= 1999;
             if (year === 'Classic') return y > 0 && y < 2000;
+            if (year === 'pre1990') return y > 0 && y < 1990;
             return String(y) === year;
           }
           return true;
         })
       );
+      return { items: fallback, page: 1, totalPages: 1, isLive: false };
     }
+  },
+
+  async discoverFiltered(options: {
+    type: 'all' | 'movie' | 'tv';
+    genreId?: number | null;
+    year?: string | null;
+    country?: string | null;
+    language?: string | null;
+    sortBy?: 'popular' | 'rating' | 'newest';
+    page?: number;
+  }): Promise<MediaItem[]> {
+    const res = await this.discoverCatalog(options);
+    return res.items;
   },
 
   async getMoviesByLanguage(languageCode: string, mode: 'original' | 'spoken' = 'original'): Promise<MediaItem[]> {
@@ -542,23 +689,94 @@ export const tmdbService = {
       return { moviesAndShows: [], people: [], isFallback: false };
     }
 
+    // Extract optional year like "happy(2006)", "master (2021)", "master 2021", or "happy [2006]"
+    let baseTitle = clean;
+    let extractedYear: string | undefined;
+    const parenYearMatch = clean.match(/^(.*?)\s*[\(\[]\s*((?:19|20)\d{2})\s*[\)\]]\s*$/);
+    if (parenYearMatch && parenYearMatch[1].trim()) {
+      baseTitle = parenYearMatch[1].trim();
+      extractedYear = parenYearMatch[2];
+    } else {
+      const trailingYearMatch = clean.match(/^(.+?)\s+((?:19|20)\d{2})$/);
+      if (trailingYearMatch && trailingYearMatch[1].trim().length >= 2) {
+        baseTitle = trailingYearMatch[1].trim();
+        extractedYear = trailingYearMatch[2];
+      }
+    }
+
+    type MultiResultItem = TmdbRawMedia & {
+      known_for_department?: string;
+      profile_path?: string | null;
+      known_for?: TmdbRawMedia[];
+    };
+
     try {
-      const data = await tmdbFetch<{
-        results: Array<
-          TmdbRawMedia & {
-            known_for_department?: string;
-            profile_path?: string | null;
-            known_for?: TmdbRawMedia[];
-          }
-        >;
-      }>('/search/multi', { query: clean, include_adult: 'false' });
+      const movieParamsP1: Record<string, string | number> = {
+        query: baseTitle,
+        include_adult: 'false',
+        page: 1,
+      };
+      if (extractedYear) movieParamsP1.year = extractedYear;
 
-      const moviesAndShows: MediaItem[] = [];
+      const tvParams: Record<string, string | number> = {
+        query: baseTitle,
+        include_adult: 'false',
+        page: 1,
+      };
+      if (extractedYear) tvParams.first_air_date_year = extractedYear;
+
+      let anyLiveOk = false;
+      const trackOk = <T,>(p: Promise<T>): Promise<T | null> =>
+        p.then(
+          (res) => {
+            anyLiveOk = true;
+            return res;
+          },
+          () => null
+        );
+
+      const [multiRes, movieP1, movieP2, movieIn, tvRes] = await Promise.all([
+        trackOk(
+          tmdbFetch<{ results: MultiResultItem[] }>('/search/multi', {
+            query: baseTitle,
+            include_adult: 'false',
+          })
+        ),
+        trackOk(tmdbFetch<{ results: TmdbRawMedia[] }>('/search/movie', movieParamsP1)),
+        !extractedYear
+          ? trackOk(
+              tmdbFetch<{ results: TmdbRawMedia[] }>('/search/movie', {
+                query: baseTitle,
+                include_adult: 'false',
+                page: 2,
+              })
+            )
+          : Promise.resolve(null),
+        trackOk(
+          tmdbFetch<{ results: TmdbRawMedia[] }>('/search/movie', {
+            ...movieParamsP1,
+            region: 'IN',
+          })
+        ),
+        trackOk(tmdbFetch<{ results: TmdbRawMedia[] }>('/search/tv', tvParams)),
+      ]);
+
+      if (!anyLiveOk) {
+        throw new Error('TMDB_UNAVAILABLE');
+      }
+
+      const dedupedMedia = new Map<string, MediaItem>();
+      const addMedia = (item: MediaItem) => {
+        const key = `${item.mediaType}:${item.id}`;
+        if (!dedupedMedia.has(key)) {
+          dedupedMedia.set(key, item);
+        }
+      };
+
       const people: PersonSearchResult[] = [];
-
-      for (const item of data.results) {
+      for (const item of multiRes?.results || []) {
         if (item.media_type === 'movie' || item.media_type === 'tv') {
-          moviesAndShows.push(mapRawMedia(item, item.media_type));
+          addMedia(mapRawMedia(item, item.media_type));
         } else if (item.media_type === 'person') {
           people.push({
             id: item.id,
@@ -573,9 +791,45 @@ export const tmdbService = {
         }
       }
 
+      for (const r of movieP1?.results || []) addMedia(mapRawMedia(r, 'movie'));
+      for (const r of movieIn?.results || []) addMedia(mapRawMedia(r, 'movie'));
+      for (const r of movieP2?.results || []) addMedia(mapRawMedia(r, 'movie'));
+      for (const r of tvRes?.results || []) addMedia(mapRawMedia(r, 'tv'));
+
+      const normQuery = baseTitle.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const indianLangs = new Set(['hi', 'te', 'ta', 'ml', 'kn', 'bn', 'mr', 'pa']);
+      const targetYearNum = extractedYear ? Number(extractedYear) : null;
+
+      const scoreItem = (item: MediaItem): number => {
+        let score = 0;
+        const normTitle = item.title.toLowerCase().replace(/[^a-z0-9]/g, '');
+        if (normTitle === normQuery) score += 500;
+        else if (normQuery && normTitle.startsWith(normQuery)) score += 200;
+        else if (normQuery && normTitle.includes(normQuery)) score += 80;
+
+        if (targetYearNum && item.releaseDate) {
+          const itemYear = parseInt(item.releaseDate.slice(0, 4), 10);
+          if (itemYear === targetYearNum) score += 800;
+          else if (Number.isFinite(itemYear) && Math.abs(itemYear - targetYearNum) <= 1) score += 250;
+        }
+
+        const origLang = (item.originalLanguage || '').toLowerCase();
+        if (indianLangs.has(origLang) && (normTitle === normQuery || (normQuery && normTitle.includes(normQuery)))) {
+          score += 180;
+        }
+
+        score += Math.min(180, Math.log1p(item.popularity || 0) * 32);
+        if (item.posterPath) score += 35;
+        return score;
+      };
+
+      const moviesAndShows = Array.from(dedupedMedia.values()).sort(
+        (a, b) => scoreItem(b) - scoreItem(a)
+      );
+
       return { moviesAndShows, people, isFallback: false };
     } catch {
-      const q = clean.toLowerCase();
+      const q = baseTitle.toLowerCase();
       const moviesAndShows = tagCuratedFallback(
         [...CURATED_MOVIES, ...CURATED_SERIES].filter(
           (m) =>

@@ -596,8 +596,11 @@ function isStreamTitleRelevant(
       'play',
       'cdn',
     ]);
+    const expectedSet = new Set(expectedTokens);
     const meaningfulCandidate = candidateTokens.filter(
-      (t) => !genericPrefixes.has(t) && !/^\d{3,4}p?$/.test(t) && !/^s\d{1,2}e\d{1,2}$/i.test(t)
+      (t) =>
+        expectedSet.has(t) ||
+        (!genericPrefixes.has(t) && !/^\d{3,4}p?$/.test(t) && !/^s\d{1,2}e\d{1,2}$/i.test(t))
     );
     if (meaningfulCandidate.length >= 2) {
       const primaryExpected = tokenizeTitle(meta.title);
@@ -1253,13 +1256,20 @@ const DEFAULT_TORRENT_TRACKERS = [
   'http://tracker.opentrackr.org:1337/announce',
   'https://tracker.tamersunion.org:443/announce',
   'https://tracker.gbitt.info:443/announce',
+  'https://tracker.bt4g.com:443/announce',
+  'http://tracker.bt4g.com:2095/announce',
+  'https://tr.nyacat.pw:443/announce',
+  'http://open.acgnxtracker.com:80/announce',
+  'http://t.nyaatracker.com:80/announce',
   'udp://open.stealth.si:80/announce',
   'udp://tracker.torrent.eu.org:451/announce',
   'udp://open.demonii.com:1337/announce',
   'udp://open.tracker.cl:1337/announce',
   'udp://exodus.desync.com:6969/announce',
+  'udp://tracker.therarbg.to:6969/announce',
   'http://tracker.qu.ax:6969/announce',
   'http://tracker.dler.org:6969/announce',
+  'http://tracker.renfei.net:8080/announce',
 ];
 
 const TORRENT_TMP_ROOT = '/tmp/kinostream-torrents';
@@ -1352,7 +1362,7 @@ async function getReadyTorrentEntry(infoHash: string, extraTrackers: string[]): 
   const dirPath = path.join(TORRENT_TMP_ROOT, hash);
   fs.mkdirSync(dirPath, { recursive: true });
 
-  const trackers = Array.from(new Set([...extraTrackers, ...DEFAULT_TORRENT_TRACKERS])).slice(0, 16);
+  const trackers = Array.from(new Set([...extraTrackers, ...DEFAULT_TORRENT_TRACKERS])).slice(0, 32);
   const magnet =
     `magnet:?xt=urn:btih:${hash}&` +
     trackers.map((t) => `tr=${encodeURIComponent(t)}`).join('&');
@@ -1361,7 +1371,7 @@ async function getReadyTorrentEntry(infoHash: string, extraTrackers: string[]): 
     tmp: TORRENT_TMP_ROOT,
     path: dirPath,
     trackers,
-    connections: 60,
+    connections: 110,
   });
 
   engine.on('error', () => {
@@ -1499,15 +1509,15 @@ function prepareTorrentFile(
           file.deselect();
         } catch {}
       }
-      // 1. Critical header & end pieces first (MP4 moov atom & MKV Cues)
+      // 1. Focus maximum peer bandwidth on initial header & pre-buffer pieces first for rapid playback startup
       engine.critical?.(fileStartPiece, Math.min(3, headPieces));
-      engine.select(fileStartPiece, headEndPiece, 10);
-      if (tailStartPiece > headEndPiece) {
-        engine.critical?.(tailStartPiece, Math.min(2, tailPieces));
-        engine.select(tailStartPiece, fileEndPiece, 8);
+      engine.select(fileStartPiece, headEndPiece, 15);
+      // 2. Sequential pre-buffer window immediately after header
+      engine.select(fileStartPiece, preEndPiece, 11);
+      // 3. Tail pieces at lower non-critical priority so they don't starve initial piece #0 startup
+      if (tailStartPiece > preEndPiece) {
+        engine.select(tailStartPiece, fileEndPiece, 4);
       }
-      // 2. Sequential pre-buffer window (focus 100% of bandwidth on initial playback pieces)
-      engine.select(fileStartPiece, preEndPiece, 5);
       // Background remainder is deferred until stream connection starts to maximize prebuffer speed
     } else {
       file.select();
@@ -1553,11 +1563,7 @@ function getTorrentPrebufferStatus(entry: ActiveTorrentEntry, state: PreparedTor
       : Boolean(bitfield?.get(state.fileEndPiece) || bitfield?.get(state.tailStartPiece));
 
   const downloadedBytesRaw = completedPrePieces * state.pieceLength;
-  const prebufferedBytes = Math.min(state.targetBytes, downloadedBytesRaw);
-  const progressPct =
-    state.targetBytes > 0
-      ? Math.min(100, Math.round((prebufferedBytes / state.targetBytes) * 100))
-      : 100;
+  const verifiedPrebufferedBytes = Math.min(state.targetBytes, downloadedBytesRaw);
 
   const wires = entry.engine.swarm?.wires || [];
   const peers = wires.length;
@@ -1576,11 +1582,31 @@ function getTorrentPrebufferStatus(entry: ActiveTorrentEntry, state: PreparedTor
   }
   const speedKbps = Math.round((speedBps / 1024) * 10) / 10;
 
-  // Fast startup: allow playback as soon as 1.0 MB + header piece are buffered
-  const minRequiredBytes = Math.min(state.targetBytes, 1.0 * 1024 * 1024);
+  // Fast startup: allow playback as soon as 512 KB + header piece are buffered
+  const minRequiredBytes = Math.min(state.targetBytes, 512 * 1024);
+  const rawSwarmDownloaded = Number(
+    (entry.engine.swarm as { downloaded?: number } | undefined)?.downloaded || 0
+  );
+  // While the first 2-4 MB piece is still downloading blocks prior to SHA1 verification,
+  // surface live sub-piece download progress (capped below ready threshold until headReady flips true)
+  const prebufferedBytes =
+    verifiedPrebufferedBytes > 0
+      ? verifiedPrebufferedBytes
+      : Math.min(Math.floor(minRequiredBytes * 0.9), Math.max(0, rawSwarmDownloaded));
+
+  const progressPct =
+    state.targetBytes > 0
+      ? Math.min(100, Math.round((prebufferedBytes / state.targetBytes) * 100))
+      : 100;
+
+  const launchProgressPct = headReady
+    ? 100
+    : minRequiredBytes > 0
+    ? Math.min(94, Math.round((prebufferedBytes / minRequiredBytes) * 100))
+    : 100;
   const readyToPlay =
     headReady &&
-    (prebufferedBytes >= minRequiredBytes || completedPrePieces >= totalPrePieces);
+    (verifiedPrebufferedBytes >= minRequiredBytes || completedPrePieces >= totalPrePieces);
 
   return {
     infoHash: entry.infoHash,
@@ -1594,11 +1620,13 @@ function getTorrentPrebufferStatus(entry: ActiveTorrentEntry, state: PreparedTor
     prebufferMb: state.prebufferMb,
     prebufferedBytes,
     targetBytes: state.targetBytes,
+    minReadyBytes: minRequiredBytes,
     completedPrePieces,
     totalPrePieces,
     headReady,
     tailReady,
     progressPct,
+    launchProgressPct,
     readyToPlay,
   };
 }
@@ -1864,6 +1892,13 @@ async function probeContainerViaNodeFetch(
   }
 }
 
+function parseTargetQualityHeight(q?: string): number | null {
+  if (!q) return null;
+  const match = q.match(/(1080|720|480|360|240|144)/i);
+  if (match) return parseInt(match[1], 10);
+  return null;
+}
+
 async function pipeStreamThroughFfmpegRemux(
   inputSource: string | NodeJS.ReadableStream,
   res: express.Response,
@@ -1871,7 +1906,8 @@ async function pipeStreamThroughFfmpegRemux(
   customHeaders?: Record<string, string>,
   preferredLang?: string,
   seekSeconds?: number,
-  preProbedInfo?: ProbedContainerInfo | null
+  preProbedInfo?: ProbedContainerInfo | null,
+  targetQuality?: string
 ) {
   let probed: ProbedContainerInfo | null =
     preProbedInfo || (typeof inputSource === 'string' ? containerProbeCache.get(inputSource) || null : null);
@@ -1880,53 +1916,75 @@ async function pipeStreamThroughFfmpegRemux(
     ...(customHeaders || {}),
   };
 
-  // Only perform a single fast 1MB node probe if cache missed AND multi-language selection is explicitly requested
+  const isLocalInputSource =
+    typeof inputSource === 'string' &&
+    (inputSource.startsWith('http://127.0.0.1') || inputSource.startsWith('http://localhost'));
+
+  const isHlsInputUrl =
+    typeof inputSource === 'string' && /\.m3u8(\?|$)/i.test(inputSource.split('#')[0]);
+
+  // Only perform a fast probe if cache missed AND multi-language selection is explicitly requested on a non-HLS container
   const wantsSpecificMultiLang = Boolean(
     preferredLang &&
       !/^(original|multi|dual)$/i.test(preferredLang.trim()) &&
-      typeof inputSource === 'string'
+      typeof inputSource === 'string' &&
+      !isHlsInputUrl
   );
   if (typeof inputSource === 'string' && !probed && wantsSpecificMultiLang) {
-    try {
-      const r = await fetch(inputSource, {
-        headers: { ...mergedHeaders, Range: 'bytes=0-1048575' },
-        redirect: 'follow',
-        signal: AbortSignal.timeout(1500),
-      });
-      const ct = (r.headers.get('content-type') || '').toLowerCase();
-      if (
-        (r.status >= 400 && r.status !== 416 && r.status !== 405 && r.status !== 501) ||
-        ct.includes('text/html') ||
-        ct.includes('application/json')
-      ) {
-        void r.body?.cancel();
-        if (!res.headersSent && !res.writableEnded) {
-          res.status(502).json({ error: `Upstream remux source invalid (HTTP ${r.status})` });
-        }
-        return;
+    if (isLocalInputSource) {
+      // Local P2P/remux inputs support fast HTTP Range seeking (including EOF moov atoms) without blocking on 1MB linear fetch
+      try {
+        probed = await probeContainerInfoAsync(inputSource, undefined, 2500);
+      } catch {
+        // Proceed straight to ffmpeg if probe times out
       }
-      if (r.ok && r.body) {
-        const buf = Buffer.from(await r.arrayBuffer());
-        if (buf.length >= 4096) {
-          probed = await runFfprobeAsync(
-            [
-              '-v', 'error',
-              '-show_entries', 'stream=index,codec_type,codec_name:stream_tags=language,title:format=duration',
-              '-of', 'json',
-              '-probesize', '1000000',
-              '-analyzeduration', '1000000',
-              '-',
-            ],
-            buf,
-            1200
-          );
-          if (probed) containerProbeCache.set(inputSource, probed);
+    } else {
+      try {
+        const r = await fetch(inputSource, {
+          headers: { ...mergedHeaders, Range: 'bytes=0-655359' },
+          redirect: 'follow',
+          signal: AbortSignal.timeout(1500),
+        });
+        const ct = (r.headers.get('content-type') || '').toLowerCase();
+        if (
+          (r.status >= 400 && r.status !== 416 && r.status !== 405 && r.status !== 501) ||
+          ct.includes('text/html') ||
+          ct.includes('application/json') ||
+          ct.includes('mpegurl')
+        ) {
+          void r.body?.cancel();
+          if (
+            !ct.includes('mpegurl') &&
+            (r.status >= 400 || ct.includes('text/html') || ct.includes('application/json'))
+          ) {
+            if (!res.headersSent && !res.writableEnded) {
+              res.status(502).json({ error: `Upstream remux source invalid (HTTP ${r.status})` });
+            }
+            return;
+          }
+        } else if (r.ok && r.body) {
+          const buf = Buffer.from(await r.arrayBuffer());
+          if (buf.length >= 4096) {
+            probed = await runFfprobeAsync(
+              [
+                '-v', 'error',
+                '-show_entries', 'stream=index,codec_type,codec_name:stream_tags=language,title:format=duration',
+                '-of', 'json',
+                '-probesize', '600000',
+                '-analyzeduration', '600000',
+                '-',
+              ],
+              buf,
+              1200
+            );
+            if (probed) containerProbeCache.set(inputSource, probed);
+          }
+        } else {
+          void r.body?.cancel();
         }
-      } else {
-        void r.body?.cancel();
+      } catch {
+        // Proceed immediately to ffmpeg without blocking startup
       }
-    } catch {
-      // Proceed immediately to ffmpeg without blocking startup
     }
   }
 
@@ -1945,8 +2003,8 @@ async function pipeStreamThroughFfmpegRemux(
         '-loglevel', 'info',
         '-fflags', '+genpts+discardcorrupt',
         '-avoid_negative_ts', 'make_zero',
-        '-probesize', '1500000',
-        '-analyzeduration', '1500000',
+        '-probesize', '500000',
+        '-analyzeduration', '500000',
       ];
       if (!useStdinPipe && seekSeconds && seekSeconds > 0) {
         args.push('-ss', String(seekSeconds));
@@ -1955,7 +2013,12 @@ async function pipeStreamThroughFfmpegRemux(
         const isLocalUrl =
           inputSource.startsWith('http://127.0.0.1') || inputSource.startsWith('http://localhost');
         if (!isLocalUrl) {
-          args.push('-reconnect', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '2');
+          args.push(
+            '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+            '-reconnect', '1',
+            '-reconnect_streamed', '1',
+            '-reconnect_delay_max', '2'
+          );
           const headerStr =
             Object.entries(mergedHeaders)
               .map(([k, v]) => `${k}: ${v}`)
@@ -1984,18 +2047,47 @@ async function pipeStreamThroughFfmpegRemux(
         args.push('-map', '0:a:0?');
       }
 
-      // Only transcode video to H.264 if probed HEVC or explicitly tagged HEVC AND not explicitly x264
-      const shouldTranscodeVideo = probed ? probed.isHevc : isHevc;
+      // Transcode video if resolution scaling requested or HEVC stream needs browser-compatible H.264
+      const targetHeight = parseTargetQualityHeight(targetQuality);
+      let crf = '24';
+      let scaleFilter = "scale='trunc(min(1280,iw)/2)*2':-2";
+      let maxrateArgs: string[] = [];
+
+      if (targetHeight) {
+        scaleFilter = `scale=-2:'min(ih,${targetHeight})':flags=fast_bilinear`;
+        if (targetHeight <= 144) {
+          crf = '32';
+          maxrateArgs = ['-maxrate', '250k', '-bufsize', '500k'];
+        } else if (targetHeight <= 240) {
+          crf = '30';
+          maxrateArgs = ['-maxrate', '450k', '-bufsize', '900k'];
+        } else if (targetHeight <= 360) {
+          crf = '28';
+          maxrateArgs = ['-maxrate', '800k', '-bufsize', '1600k'];
+        } else if (targetHeight <= 480) {
+          crf = '26';
+          maxrateArgs = ['-maxrate', '1400k', '-bufsize', '2800k'];
+        } else if (targetHeight <= 720) {
+          crf = '24';
+          maxrateArgs = ['-maxrate', '3000k', '-bufsize', '6000k'];
+        } else {
+          crf = '22';
+          maxrateArgs = ['-maxrate', '6000k', '-bufsize', '12000k'];
+        }
+      }
+
+      const shouldTranscodeVideo = Boolean(targetHeight) || (probed ? probed.isHevc : isHevc);
       args.push(
         ...(shouldTranscodeVideo
           ? [
               '-c:v', 'libx264',
               '-preset', 'ultrafast',
               '-tune', 'zerolatency',
-              '-crf', '24',
-              '-vf', "scale='trunc(min(1280,iw)/2)*2':-2",
+              '-crf', crf,
+              ...maxrateArgs,
+              '-vf', scaleFilter,
               '-pix_fmt', 'yuv420p',
-              '-g', '48',
+              '-g', '24',
               '-threads', '0',
             ]
           : ['-c:v', 'copy']),
@@ -2019,13 +2111,20 @@ async function pipeStreamThroughFfmpegRemux(
         resolve(outcome);
       };
 
+      const startupBudgetMs = isLocalInputSource
+        ? 22000
+        : shouldTranscodeVideo
+        ? 16000
+        : mode === 'url'
+        ? 11000
+        : 12000;
       const startupTimer = setTimeout(() => {
         if (!sentAnyBytes) {
           try { ff.kill('SIGKILL'); } catch {}
           pipeStream?.destroy();
           done('empty');
         }
-      }, mode === 'url' ? 3500 : 5500);
+      }, startupBudgetMs);
 
       let stderrTail = '';
       ff.stderr?.on('data', (d: Buffer) => {
@@ -2124,8 +2223,8 @@ async function pipeStreamThroughFfmpegRemux(
   const isLocalInput =
     inputSource.startsWith('http://127.0.0.1') || inputSource.startsWith('http://localhost');
 
-  // If ffmpeg libavformat rejected CDN TLS/Referer and output zero bytes, fall back to Node fetch() -> pipe:0
-  if (outcome === 'empty' && !isLocalInput && !res.destroyed && !res.writableEnded) {
+  // If ffmpeg libavformat rejected CDN TLS/Referer and output zero bytes on a non-HLS direct file, fall back to Node fetch() -> pipe:0
+  if (outcome === 'empty' && !isLocalInput && !isHlsInputUrl && !res.destroyed && !res.writableEnded) {
     try {
       const fetchRes = await fetch(inputSource, {
         headers: mergedHeaders,
@@ -2133,7 +2232,13 @@ async function pipeStreamThroughFfmpegRemux(
         signal: AbortSignal.timeout(6500),
       });
       const ct = (fetchRes.headers.get('content-type') || '').toLowerCase();
-      if (fetchRes.ok && fetchRes.body && !ct.includes('text/html') && !ct.includes('application/json')) {
+      if (
+        fetchRes.ok &&
+        fetchRes.body &&
+        !ct.includes('text/html') &&
+        !ct.includes('application/json') &&
+        !ct.includes('mpegurl')
+      ) {
         const nodeStream = Readable.fromWeb(fetchRes.body as unknown as NodeReadableStream);
         outcome = await runAttempt('pipe-fetch', nodeStream);
       } else {
@@ -2362,10 +2467,16 @@ async function startServer() {
       }
     });
     try {
+      const isStremioAddonTarget =
+        /torrentio|strem\.fun|torrentsdb|peerflix|meteor|mediafusion|elfhosted|stremio/i.test(targetUrl);
       const proxyHeaders: Record<string, string> = {
         'User-Agent': DEFAULT_UA,
         Accept: 'application/json, text/html, text/plain, */*',
       };
+      if (isStremioAddonTarget) {
+        proxyHeaders['Origin'] = 'https://web.stremio.com';
+        proxyHeaders['Referer'] = 'https://web.stremio.com/';
+      }
       if (req.query.referer) {
         proxyHeaders['Referer'] = String(req.query.referer);
       }
@@ -2436,7 +2547,8 @@ async function startServer() {
   app.get('/api/stream-proxy', async (req, res) => {
     const targetUrl = req.query.url as string;
     const hParam = (req.query.h as string) || '';
-    const shouldRemux = req.query.remux === '1';
+    const qualityParam = (req.query.quality as string) || '';
+    const shouldRemux = req.query.remux === '1' || Boolean(qualityParam);
     const isHevc = req.query.hevc === '1';
     const isSegment = req.query.seg === '1';
     const preferredLang = (req.query.lang as string) || '';
@@ -2488,7 +2600,7 @@ async function startServer() {
         }
         return res.status(200).end();
       }
-      await pipeStreamThroughFfmpegRemux(targetUrl, res, isHevc, forwardHeaders, preferredLang, seekSec);
+      await pipeStreamThroughFfmpegRemux(targetUrl, res, isHevc, forwardHeaders, preferredLang, seekSec, undefined, qualityParam);
       return;
     }
 
@@ -2893,10 +3005,12 @@ async function startServer() {
         speedKbps: 0,
         prebufferMb,
         prebufferedBytes: 0,
-        targetBytes: Math.max(5, Math.min(30, prebufferMb)) * 1024 * 1024,
+        targetBytes: Math.max(2, Math.min(30, prebufferMb)) * 1024 * 1024,
+        minReadyBytes: 512 * 1024,
         headReady: false,
         tailReady: false,
         progressPct: 0,
+        launchProgressPct: 0,
         readyToPlay: false,
       });
     }
@@ -2918,8 +3032,9 @@ async function startServer() {
     const seasonParam = req.query.season ? Number(req.query.season) : undefined;
     const episodeParam = req.query.episode ? Number(req.query.episode) : undefined;
     const trParam = String(req.query.tr || '');
-    const remuxParam = req.query.remux === '1';
-    const rawParam = req.query.raw === '1';
+    const qualityParam = String(req.query.quality || '').trim();
+    const remuxParam = req.query.remux === '1' || Boolean(qualityParam);
+    const rawParam = req.query.raw === '1' && !qualityParam;
     const isHevc = req.query.hevc === '1';
     const langParam = String(req.query.lang || '').trim();
     const seekSec = req.query.ss ? Number(req.query.ss) : req.query.t ? Number(req.query.t) : 0;
@@ -2959,7 +3074,7 @@ async function startServer() {
       const targetFile = found.file;
       const state = prepareTorrentFile(entry, found.fileIdx, targetFile, isP2P, prebufferMb);
 
-      const needsRemux = !rawParam && (remuxParam || /\.(mkv|avi)$/i.test(targetFile.name));
+      const needsRemux = !rawParam && (remuxParam || /\.(mkv|avi|m4v|mov)$/i.test(targetFile.name));
       if (needsRemux) {
         const localRawUrl = `http://127.0.0.1:${PORT}/api/torrent/stream?infoHash=${encodeURIComponent(infoHash)}&fileIdx=${found.fileIdx}&raw=1&p2p=${isP2P ? '1' : '0'}&prebufferMb=${state.prebufferMb}`;
         if (req.method === 'HEAD') {
@@ -2979,13 +3094,13 @@ async function startServer() {
           releaseActiveStream();
           return res.status(200).end();
         }
-        // Cap pre-FFmpeg piece wait at 3000ms so remux never stalls when header piece arrives
+        // Wait up to 8s for header piece before launching ffmpeg so remux starts reliably
         if (!entry.engine.bitfield?.get(state.fileStartPiece)) {
           await new Promise<void>((resolve) => {
             const maxWait = setTimeout(() => {
               entry.engine.off?.('verify', onVerify);
               resolve();
-            }, 3000);
+            }, 8000);
             const onVerify = (pieceIdx: unknown) => {
               if (pieceIdx === state.fileStartPiece) {
                 clearTimeout(maxWait);
@@ -2996,13 +3111,13 @@ async function startServer() {
             entry.engine.on('verify', onVerify);
           });
         }
-        return pipeStreamThroughFfmpegRemux(localRawUrl, res, isHevc, undefined, langParam, seekSec);
+        return pipeStreamThroughFfmpegRemux(localRawUrl, res, isHevc, undefined, langParam, seekSec, undefined, qualityParam);
       }
 
-      // Trigger background pieces download now that stream playback has begun
+      // Queue background remainder at priority 0 (< createReadStream's priority 1) so shufflePriority never stalls active playback reads
       if (isP2P && state.preEndPiece < state.fileEndPiece) {
         try {
-          entry.engine.select?.(state.preEndPiece + 1, state.fileEndPiece, 1);
+          entry.engine.select?.(state.preEndPiece + 1, state.fileEndPiece, 0);
         } catch {}
       }
 
@@ -3560,7 +3675,16 @@ async function startServer() {
 
       const languagePriority = (lang: string): number => {
         const l = lang.toLowerCase();
-        if (l.includes('hindi') || l.includes('bengali') || l.includes('tamil') || l.includes('telugu')) return 0;
+        if (
+          l.includes('hindi') ||
+          l.includes('bengali') ||
+          l.includes('tamil') ||
+          l.includes('telugu') ||
+          l.includes('malayalam') ||
+          l.includes('kannada')
+        ) {
+          return 0;
+        }
         if (l.includes('dual') || l.includes('multi')) return 1;
         if (l === 'english' || l === 'english (dub)') return 2;
         if (l === 'original') return 3;

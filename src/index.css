@@ -129,24 +129,43 @@ input[type="range"].cinema-range {
 }
 
 input[type="range"].cinema-range::-webkit-slider-runnable-track {
-  height: 4px;
+  height: 6px;
   border-radius: 9999px;
 }
 
 input[type="range"].cinema-range::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   border-radius: 9999px;
-  background: #e50914;
+  background: #ffffff;
+  border: 3px solid var(--player-accent, #e50914);
   margin-top: -5px;
-  box-shadow: 0 0 0 3px rgba(229, 9, 20, 0.25);
-  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
+  box-shadow:
+    0 0 0 4px var(--player-accent-glow, rgba(229, 9, 20, 0.28)),
+    0 2px 10px rgba(0, 0, 0, 0.65);
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 150ms ease;
 }
 
-input[type="range"].cinema-range:hover::-webkit-slider-thumb {
-  transform: scale(1.2);
+input[type="range"].cinema-range:hover::-webkit-slider-thumb,
+input[type="range"].cinema-range:active::-webkit-slider-thumb {
+  transform: scale(1.22);
+  box-shadow:
+    0 0 0 6px var(--player-accent-glow, rgba(229, 9, 20, 0.36)),
+    0 4px 14px rgba(0, 0, 0, 0.75);
+}
+
+input[type="range"].cinema-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: #ffffff;
+  border: 3px solid var(--player-accent, #e50914);
+  box-shadow:
+    0 0 0 4px var(--player-accent-glow, rgba(229, 9, 20, 0.28)),
+    0 2px 10px rgba(0, 0, 0, 0.65);
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
 @keyframes sports-ticker-scroll {
@@ -185,12 +204,28 @@ input[type="range"].cinema-range:hover::-webkit-slider-thumb {
   will-change: transform;
 }
 
+@keyframes ks-buffer-sweep {
+  0% {
+    transform: translate3d(-100%, 0, 0);
+  }
+  100% {
+    transform: translate3d(260%, 0, 0);
+  }
+}
+
+.ks-buffer-sweep {
+  animation: ks-buffer-sweep 1.15s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+  will-change: transform;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .liquid-blob-a,
   .liquid-blob-b,
   .liquid-blob-c,
   .liquid-skeleton::after,
-  .sports-ticker-track {
+  .sports-ticker-track,
+  .ks-spin-arc,
+  .ks-buffer-sweep {
     animation: none !important;
   }
   * {

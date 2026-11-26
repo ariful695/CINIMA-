@@ -2838,7 +2838,7 @@ export const STREMIO_ADDONS_NET_DIRECTORY: StremioNetDirectoryAddon[] = [
     "category": "Streams"
   },
   {
-    "id": "stremionet-cncverse-bridge",
+    "id": "stremionet-cncverse-bridge-streams",
     "slug": "cncverse-bridge",
     "name": "CNCVerse Bridge",
     "manifestUrl": "https://cncverse.dpdns.org/manifest.json",

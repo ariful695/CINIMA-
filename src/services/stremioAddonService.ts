@@ -725,16 +725,40 @@ export const stremioAddonService = {
               return;
             }
 
-            if (s.infoHash && /^[a-fA-F0-9]{40}$/.test(s.infoHash)) {
+            let resolvedInfoHash =
+              s.infoHash && /^[a-fA-F0-9]{40}$/.test(s.infoHash.trim())
+                ? s.infoHash.trim().toLowerCase()
+                : '';
+            let magnetTrackers: string[] = [];
+
+            const rawMagnetCandidate =
+              (s.url && s.url.startsWith('magnet:') ? s.url : '') ||
+              (s.externalUrl && s.externalUrl.startsWith('magnet:') ? s.externalUrl : '');
+            if (!resolvedInfoHash && rawMagnetCandidate) {
+              const hashMatch = rawMagnetCandidate.match(/xt=urn:btih:([a-fA-F0-9]{40})/i);
+              if (hashMatch?.[1]) {
+                resolvedInfoHash = hashMatch[1].toLowerCase();
+              }
+              try {
+                const magUrl = new URL(rawMagnetCandidate);
+                magnetTrackers = magUrl.searchParams
+                  .getAll('tr')
+                  .map((t) => t.trim())
+                  .filter((t) => t.startsWith('udp://') || t.startsWith('http'));
+              } catch {}
+            }
+
+            if (resolvedInfoHash) {
               const filename = s.behaviorHints?.filename || s.title || '';
               const isMp4 = /\.mp4\b/i.test(filename);
               const isHevc = /\b(x265|hevc|10bit)\b/i.test(rawText);
               const baseNeedsRemux =
-                !isMp4 || /\b(\.mkv|\.avi|x265|hevc|10bit|dts|truehd|ddp|eac3|ac3)\b/i.test(rawText);
-              const trackers = (s.sources || [])
+                !isMp4 || /\b(\.mkv|\.avi|\.m4v|\.mov|x265|hevc|10bit|dts|truehd|ddp|eac3|ac3)\b/i.test(rawText);
+              const sourceTrackers = (s.sources || [])
                 .filter((src) => src.startsWith('tracker:'))
-                .map((src) => src.slice('tracker:'.length))
-                .slice(0, 8)
+                .map((src) => src.slice('tracker:'.length));
+              const trackers = Array.from(new Set([...sourceTrackers, ...magnetTrackers]))
+                .slice(0, 12)
                 .join(',');
 
               const displayLabel =
@@ -749,7 +773,7 @@ export const stremioAddonService = {
                 const needsRemux = baseNeedsRemux || languages.length > 1;
                 const p2pEnabled = storageService.getP2PTorrentEnabled();
                 const prebufferMb = storageService.getP2PPrebufferSizeMb();
-                const torrentUrl = `/api/torrent/stream?infoHash=${encodeURIComponent(s.infoHash!)}${
+                const torrentUrl = `/api/torrent/stream?infoHash=${encodeURIComponent(resolvedInfoHash)}${
                   typeof s.fileIdx === 'number' ? `&fileIdx=${s.fileIdx}` : ''
                 }${seasonEpQuery}${trackers ? `&tr=${encodeURIComponent(trackers)}` : ''}${needsRemux ? '&remux=1' : ''}${
                   isHevc ? '&hevc=1' : ''

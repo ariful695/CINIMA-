@@ -118,7 +118,7 @@ export const LiveTvScreen: React.FC = () => {
   const [sportsLoading, setSportsLoading] = useState(false);
   const [sportsRefreshTick, setSportsRefreshTick] = useState(0);
 
-  const [selectedGroup] = useState<string>('All');
+  const [selectedGroup, setSelectedGroup] = useState<string>('All');
   const [channelFilter, setChannelFilter] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   const [favoritesOnly, setFavoritesOnly] = useState(false);
@@ -300,41 +300,66 @@ export const LiveTvScreen: React.FC = () => {
             type="button"
             onClick={() => openLibrarySection('extensions')}
             aria-label="Manage Live TV add-ons"
-            className="hidden sm:inline-flex min-h-[44px] px-4 rounded-full bg-white/[0.06] border border-white/15 text-xs font-medium text-slate-200 hover:bg-white/[0.12] hover:border-white/25 items-center gap-2 active:scale-95 transition-all whitespace-nowrap"
+            className="min-h-[44px] px-3.5 sm:px-4 rounded-full bg-white/[0.06] border border-white/15 text-xs font-medium text-slate-200 hover:bg-white/[0.12] hover:border-white/25 inline-flex items-center gap-1.5 active:scale-95 transition-all whitespace-nowrap"
           >
             <Settings className="h-4 w-4 text-[#3B82F6]" />
-            <span>Sources</span>
+            <span className="hidden xs:inline">IPTV Add-ons</span>
           </button>
         </div>
       </div>
 
       {/* Live TV Sub-Section Switcher (Live Events vs TV Channels) */}
-      <div className="inline-flex p-1 rounded-2xl bg-[#0E1422] border border-white/12 gap-1">
-        <button
-          type="button"
-          onClick={() => setLiveSection('events')}
-          className={`min-h-[40px] px-4 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 transition-all ${
-            liveSection === 'events'
-              ? 'bg-gradient-to-r from-[#3B82F6]/30 to-cyan-500/25 border border-sky-400/60 text-white shadow-sm'
-              : 'text-slate-300 hover:text-white'
-          }`}
-        >
-          <Radio className={`h-4 w-4 ${liveSection === 'events' ? 'text-rose-400' : 'text-slate-400'}`} />
-          <span>Live Events</span>
-        </button>
-        <button
-          type="button"
-          onClick={() => setLiveSection('channels')}
-          className={`min-h-[40px] px-4 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 transition-all ${
-            liveSection === 'channels'
-              ? 'bg-white/[0.14] border border-white/25 text-white shadow-sm'
-              : 'text-slate-300 hover:text-white'
-          }`}
-        >
-          <Tv className={`h-4 w-4 ${liveSection === 'channels' ? 'text-sky-400' : 'text-slate-400'}`} />
-          <span>TV Channels</span>
-        </button>
+      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        <div className="inline-flex p-1 rounded-2xl bg-[#0E1422] border border-white/12 gap-1">
+          <button
+            type="button"
+            onClick={() => setLiveSection('events')}
+            className={`min-h-[40px] px-4 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 transition-all ${
+              liveSection === 'events'
+                ? 'bg-gradient-to-r from-[#3B82F6]/30 to-cyan-500/25 border border-sky-400/60 text-white shadow-sm'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            <Radio className={`h-4 w-4 ${liveSection === 'events' ? 'text-rose-400' : 'text-slate-400'}`} />
+            <span>Live Events</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setLiveSection('channels')}
+            className={`min-h-[40px] px-4 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-2 transition-all ${
+              liveSection === 'channels'
+                ? 'bg-white/[0.14] border border-white/25 text-white shadow-sm'
+                : 'text-slate-300 hover:text-white'
+            }`}
+          >
+            <Tv className={`h-4 w-4 ${liveSection === 'channels' ? 'text-sky-400' : 'text-slate-400'}`} />
+            <span>TV Channels</span>
+          </button>
+        </div>
       </div>
+
+      {/* Category Pills Bar (when in TV Channels mode) */}
+      {liveSection === 'channels' && (
+        <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-none">
+          {CURATED_LIVE_CATEGORIES.map((cat) => {
+            const isSelected = selectedGroup === cat;
+            return (
+              <button
+                key={cat}
+                type="button"
+                onClick={() => setSelectedGroup(cat)}
+                className={`min-h-[38px] px-4 rounded-xl text-xs font-semibold whitespace-nowrap transition-all active:scale-95 ${
+                  isSelected
+                    ? 'bg-[#E50914] text-white shadow-lg shadow-[#E50914]/30'
+                    : 'bg-white/[0.06] hover:bg-white/[0.12] border border-white/12 text-slate-300 hover:text-white'
+                }`}
+              >
+                {cat === 'Favorites' ? `⭐ ${cat}` : cat}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Expandable Liquid Search Input (shared between Live Events and TV Channels) */}
       <AnimatePresence>

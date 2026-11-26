@@ -32,12 +32,14 @@ import {
   Volume2,
   VolumeX,
   X,
+  Zap,
 } from 'lucide-react';
 import { bengaliSerialService } from '../services/bengaliSerialService';
 import {
   resolveSubtitleTrackUrl,
   streamProviderService,
 } from '../services/streamProviderService';
+import { getTmdbImageUrl, tmdbService } from '../services/tmdbService';
 import { storageService } from '../services/storageService';
 import { nativeAndroidBridge } from '../services/nativeAndroidBridge';
 import { useAppState } from '../state/AppContext';
@@ -50,14 +52,79 @@ import {
 import {
   extractLanguageTags,
   getAvailableLanguages,
-  getAvailableProviders,
-  getCanonicalProviderName,
   getSourceFlags,
   matchesQualityFilter,
   matchesSourceTypeFilter,
   QualityFilter,
   SourceTypeFilter,
 } from '../utils/streamFilters';
+
+export const QUALITY_PRESETS = [
+  { id: 'auto', label: 'Auto (Original)', badge: 'Default' },
+  { id: '1080p', label: '1080p', badge: 'FHD' },
+  { id: '720p', label: '720p', badge: 'HD' },
+  { id: '480p', label: '480p', badge: 'SD' },
+  { id: '360p', label: '360p', badge: 'Data Saver' },
+  { id: '240p', label: '240p', badge: 'Low' },
+  { id: '144p', label: '144p', badge: 'Ultra Low' },
+] as const;
+
+function cleanStreamTitle(label: string): string {
+  return label
+    .replace(/\b(PlavioHD|Nuvio|Stremio|CloudStream|Torrentio|II Corsaro Viola|ThePirateBay|MediaFusion|SuperStream)\b/gi, '')
+    .replace(/^[\s·|:-]+|[\s·|:-]+$/g, '')
+    .trim() || 'High Quality Stream';
+}
+
+function isServerRemuxUrl(url?: string | null): boolean {
+  if (!url) return false;
+  if (url.includes('remux=1')) return true;
+  if (
+    /[?&]quality=/.test(url) &&
+    (url.includes('/api/stream-proxy') || url.includes('/api/torrent/stream'))
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function stripSeekParam(url: string): string {
+  return url
+    .replace(/([?&])ss=\d+(?=&|$)/gi, '$1')
+    .replace(/\?&/, '?')
+    .replace(/[?&]$/, '');
+}
+
+function buildUrlWithSeekParam(url: string, seekSec: number): string {
+  const clean = stripSeekParam(url);
+  if (seekSec <= 3) return clean;
+  const sep = clean.includes('?') ? '&' : '?';
+  return `${clean}${sep}ss=${Math.floor(seekSec)}`;
+}
+
+function getWatchProgressKeyForSession(session: PlayerSession): string {
+  return session.mediaType === 'tv'
+    ? `tv-${session.mediaId}-s${session.seasonNumber || 1}e${session.episodeNumber || 1}`
+    : `movie-${session.mediaId}`;
+}
+
+function resolveSessionInitialResumeTime(session: PlayerSession): number {
+  if (session.initialTime && session.initialTime > 3) {
+    return session.initialTime;
+  }
+  if (session.mediaType === 'live' || !session.mediaId || session.mediaId <= 0) {
+    return 0;
+  }
+  const key = getWatchProgressKeyForSession(session);
+  const saved = storageService.getContinueWatching().find((item) => item.key === key);
+  if (!saved || !Number.isFinite(saved.currentTime) || saved.currentTime <= 3) {
+    return 0;
+  }
+  if (saved.duration >= 300 && saved.currentTime >= saved.duration - 15) {
+    return 0;
+  }
+  return saved.currentTime;
+}
 
 interface P2PPrebufferStatus {
   ready: boolean;
@@ -72,9 +139,11 @@ interface P2PPrebufferStatus {
   prebufferMb: number;
   prebufferedBytes: number;
   targetBytes: number;
+  minReadyBytes?: number;
   headReady: boolean;
   tailReady: boolean;
   progressPct: number;
+  launchProgressPct?: number;
   readyToPlay: boolean;
   error?: string;
 }
@@ -190,9 +259,9 @@ function selectMostCompatibleSource(
       score += 10;
     }
 
-    // 3. Direct HTTPS or same-origin proxy protocol (prefer instant CDN streams over slower P2P swarm startup)
+    // 3. Direct HTTPS or same-origin proxy protocol (prefer instant CDN streams over slower P2P swarm startup, without excluding P2P fallbacks)
     if (url.includes('/api/torrent/stream')) {
-      score -= 1800;
+      score -= 320;
     } else if (url.startsWith('/api/') || url.startsWith('https://')) {
       score += 180;
     }
@@ -269,15 +338,19 @@ function selectBestPlayableSource(
   );
 }
 
-const P2PPrebufferHUD: React.FC<{
+const CinemaPrebufferHUD: React.FC<{
+  mode: 'resolving' | 'p2p' | 'direct';
+  session: PlayerSession;
   status: P2PPrebufferStatus | null;
-  activeSource: StreamSource;
+  activeSource: StreamSource | null;
   accentHex: string;
   onCancel: () => void;
   onSwitchServer?: () => void;
-  onContinueAnyway: () => void;
+  onContinueAnyway?: () => void;
   hasAlternativeSources: boolean;
 }> = ({
+  mode,
+  session,
   status,
   activeSource,
   accentHex,
@@ -287,204 +360,316 @@ const P2PPrebufferHUD: React.FC<{
   hasAlternativeSources,
 }) => {
   const [displayPct, setDisplayPct] = useState(0);
-  const targetPct = status?.progressPct ?? 0;
+  const rawLaunchPct =
+    mode === 'p2p'
+      ? status?.launchProgressPct ??
+        (status?.minReadyBytes && status.minReadyBytes > 0
+          ? Math.min(100, Math.round(((status.prebufferedBytes || 0) / status.minReadyBytes) * 100))
+          : status?.progressPct ?? 0)
+      : 0;
   const currentPctRef = useRef(0);
 
   useEffect(() => {
+    if (mode !== 'p2p') {
+      currentPctRef.current = 0;
+      setDisplayPct(0);
+      return;
+    }
     let animId: number;
     const update = () => {
-      const diff = targetPct - currentPctRef.current;
-      if (Math.abs(diff) > 0.1) {
-        currentPctRef.current += diff * 0.18;
+      const diff = rawLaunchPct - currentPctRef.current;
+      if (Math.abs(diff) > 0.15) {
+        currentPctRef.current += diff * 0.24;
         const rounded = Math.round(Math.min(100, Math.max(0, currentPctRef.current)));
         setDisplayPct((prev) => (prev !== rounded ? rounded : prev));
         animId = requestAnimationFrame(update);
       } else {
-        currentPctRef.current = targetPct;
-        const rounded = Math.round(targetPct);
+        currentPctRef.current = rawLaunchPct;
+        const rounded = Math.round(rawLaunchPct);
         setDisplayPct((prev) => (prev !== rounded ? rounded : prev));
       }
     };
     animId = requestAnimationFrame(update);
     return () => cancelAnimationFrame(animId);
-  }, [targetPct]);
+  }, [rawLaunchPct, mode]);
 
-  const targetBytes = status?.targetBytes || 1048576;
+  const backdropSrc =
+    getTmdbImageUrl(session.backdropPath, 'w1280') ||
+    session.fallbackBackdrop ||
+    getTmdbImageUrl(session.posterPath, 'w780') ||
+    session.fallbackPoster ||
+    null;
+
+  const launchTargetBytes = status?.minReadyBytes || 512 * 1024;
   const prebufferedBytes = status?.prebufferedBytes || 0;
-  const remainingBytes = Math.max(0, targetBytes - prebufferedBytes);
+  const remainingBytes = Math.max(0, launchTargetBytes - prebufferedBytes);
   const bytesPerSec = Math.max(1, (status?.speedKbps || 0) * 1024);
   const etaSec =
-    status?.speedKbps && status.speedKbps > 10 ? Math.ceil(remainingBytes / bytesPerSec) : null;
+    status?.speedKbps && status.speedKbps > 15 ? Math.ceil(remainingBytes / bytesPerSec) : null;
 
   const mbPre = (prebufferedBytes / (1024 * 1024)).toFixed(1);
-  const mbTarget = (targetBytes / (1024 * 1024)).toFixed(1);
+  const mbLaunch = (launchTargetBytes / (1024 * 1024)).toFixed(1);
   const speedStr =
     status && status.speedKbps >= 1024
       ? `${(status.speedKbps / 1024).toFixed(1)} MB/s`
-      : `${status?.speedKbps || 0} KB/s`;
+      : `${Math.round(status?.speedKbps || 0)} KB/s`;
 
   const clampedPct = Math.min(100, Math.max(0, displayPct));
-  const ringCircumference = 251.2;
+  const ringCircumference = 201.06; // 2 * pi * 32
   const strokeDashoffset = ringCircumference * (1 - clampedPct / 100);
-  const stageLabel = !status?.ready
-    ? 'Connecting to P2P swarm'
-    : !status.headReady
-    ? 'Fetching stream header atom'
-    : 'Pre-buffering initial playback window';
+
+  const audioTag = activeSource?.audioLanguage
+    ? extractLanguageTags(activeSource.audioLanguage)[0]
+    : undefined;
+  const episodeContext =
+    session.mediaType === 'tv' && session.seasonNumber && session.episodeNumber
+      ? `S${session.seasonNumber} · E${session.episodeNumber}${session.episodeTitle ? ` · ${session.episodeTitle}` : ''}`
+      : session.subtitle || '';
+
+  const metadataParts = [
+    audioTag ? `${audioTag} Audio` : activeSource ? 'Original Audio' : null,
+    activeSource?.quality || null,
+    activeSource?.format ? activeSource.format.toUpperCase() : null,
+  ].filter(Boolean) as string[];
+
+  const stageLabel =
+    mode === 'resolving'
+      ? 'Matching fastest audio & video server'
+      : mode === 'direct'
+      ? 'Buffering initial cinema frames'
+      : !status?.ready
+      ? 'Connecting to peer swarm'
+      : !status.headReady
+      ? 'Reading media header'
+      : 'Fast-buffering playback start';
 
   return (
     <div
       onClick={(e) => e.stopPropagation()}
-      className="player-interactive absolute inset-0 z-[25] flex items-center justify-center p-4 transition-opacity duration-150"
-      style={{ backgroundColor: 'rgba(5, 7, 12, 0.78)' }}
+      className="player-interactive absolute inset-0 z-[25] flex items-center justify-center p-3 sm:p-6 overflow-hidden"
     >
-      <div
-        className="relative max-w-md w-full rounded-3xl border border-white/15 backdrop-blur-2xl p-5 sm:p-6 space-y-5 shadow-[0_24px_80px_rgba(0,0,0,0.75)] overflow-hidden"
-        style={{ backgroundColor: 'rgba(11, 15, 25, 0.86)' }}
-      >
+      {/* Full-bleed Cinema Backdrop Scrim */}
+      <div className="pointer-events-none absolute inset-0 bg-[#05070C]">
+        {backdropSrc && (
+          <img
+            src={backdropSrc}
+            alt=""
+            referrerPolicy="no-referrer"
+            className="h-full w-full object-cover opacity-30 scale-105 blur-xl"
+          />
+        )}
         <div
-          className="pointer-events-none absolute -top-24 -right-24 h-48 w-48 rounded-full opacity-20 blur-3xl"
+          className="absolute inset-0"
+          style={{
+            background:
+              'radial-gradient(circle at 50% 42%, rgba(8, 11, 18, 0.55) 0%, rgba(5, 7, 12, 0.92) 78%)',
+          }}
+        />
+        <div
+          className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 h-64 w-64 rounded-full opacity-20 blur-3xl"
           style={{ backgroundColor: accentHex }}
         />
+      </div>
 
-        {/* Radial Progress Ring & Source Header */}
-        <div className="relative flex items-center gap-4">
-          <div className="relative h-24 w-24 shrink-0 flex items-center justify-center">
-            <svg className="h-24 w-24 -rotate-90" viewBox="0 0 96 96" aria-hidden="true">
-              <defs>
-                <linearGradient id="p2pHudRingGradient" x1="0%" y1="0%" x2="100%" y2="100%">
-                  <stop offset="0%" stopColor={accentHex} />
-                  <stop offset="100%" stopColor="#38BDF8" />
-                </linearGradient>
-              </defs>
-              <circle
-                cx="48"
-                cy="48"
-                r="40"
-                fill="none"
-                stroke="rgba(255, 255, 255, 0.1)"
-                strokeWidth="6"
-              />
-              <circle
-                cx="48"
-                cy="48"
-                r="40"
-                fill="none"
-                stroke="url(#p2pHudRingGradient)"
-                strokeWidth="6"
-                strokeDasharray={ringCircumference}
-                strokeDashoffset={strokeDashoffset}
-                strokeLinecap="round"
-              />
-            </svg>
-            <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
-              <span className="text-lg font-bold font-mono-tabular text-white leading-none">
-                {Math.round(clampedPct)}%
-              </span>
-              <span className="text-[11px] font-mono-tabular text-slate-400 mt-1">
-                {mbPre} MB
-              </span>
-            </div>
+      {/* Compact Landscape-Safe Cinema Prebuffer Surface */}
+      <div
+        className="relative w-full max-w-lg max-h-[92vh] overflow-y-auto rounded-2xl sm:rounded-3xl border border-white/15 backdrop-blur-2xl p-4 sm:p-6 space-y-4 shadow-[0_24px_80px_rgba(0,0,0,0.85)]"
+        style={{
+          background:
+            'linear-gradient(180deg, rgba(20, 25, 38, 0.84) 0%, rgba(10, 13, 22, 0.92) 100%)',
+          boxShadow:
+            'inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 24px 80px rgba(0, 0, 0, 0.85)',
+        }}
+      >
+        {/* Top Focal Row: Progress Dial + Title & Audio Metadata */}
+        <div className="flex items-center gap-4">
+          <div className="relative h-16 w-16 sm:h-20 sm:w-20 shrink-0 flex items-center justify-center">
+            {mode === 'p2p' ? (
+              <>
+                <svg className="h-full w-full -rotate-90" viewBox="0 0 76 76" aria-hidden="true">
+                  <defs>
+                    <linearGradient id="cinemaPrebufferGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor={accentHex} />
+                      <stop offset="100%" stopColor="#38BDF8" />
+                    </linearGradient>
+                  </defs>
+                  <circle
+                    cx="38"
+                    cy="38"
+                    r="32"
+                    fill="none"
+                    stroke="rgba(255, 255, 255, 0.1)"
+                    strokeWidth="5"
+                  />
+                  <circle
+                    cx="38"
+                    cy="38"
+                    r="32"
+                    fill="none"
+                    stroke="url(#cinemaPrebufferGrad)"
+                    strokeWidth="5"
+                    strokeDasharray={ringCircumference}
+                    strokeDashoffset={strokeDashoffset}
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center text-center">
+                  <span className="text-sm sm:text-base font-bold font-mono-tabular text-white leading-none">
+                    {clampedPct}%
+                  </span>
+                </div>
+              </>
+            ) : (
+              <>
+                <svg className="h-full w-full" viewBox="0 0 76 76" aria-hidden="true">
+                  <circle
+                    cx="38"
+                    cy="38"
+                    r="32"
+                    fill="none"
+                    stroke="rgba(255, 255, 255, 0.1)"
+                    strokeWidth="4.5"
+                  />
+                </svg>
+                <svg
+                  className="ks-spin-arc absolute inset-0 h-full w-full"
+                  viewBox="0 0 76 76"
+                  aria-hidden="true"
+                >
+                  <defs>
+                    <linearGradient id="cinemaSpinGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                      <stop offset="0%" stopColor={accentHex} />
+                      <stop offset="100%" stopColor="#38BDF8" stopOpacity="0.15" />
+                    </linearGradient>
+                  </defs>
+                  <circle
+                    cx="38"
+                    cy="38"
+                    r="32"
+                    fill="none"
+                    stroke="url(#cinemaSpinGrad)"
+                    strokeWidth="4.5"
+                    strokeDasharray="68 140"
+                    strokeLinecap="round"
+                  />
+                </svg>
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Zap className="h-5 w-5 sm:h-6 sm:w-6 text-white/90" />
+                </div>
+              </>
+            )}
           </div>
 
           <div className="min-w-0 flex-1 space-y-1">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-[11px] font-semibold uppercase tracking-wider px-2 py-0.5 rounded-md bg-white/[0.08] text-sky-300 border border-sky-400/25">
-                P2P Stream
-              </span>
-              <span className="text-xs text-slate-300 font-mono-tabular">
-                {activeSource.quality || 'Auto'}
-              </span>
-            </div>
-            <h3 className="text-base sm:text-lg font-bold text-white truncate">
-              {activeSource.providerName}
-            </h3>
-            <p className="text-xs text-slate-300 truncate">
-              {status?.fileName || activeSource.label}
+            <p className="text-[11px] font-medium tracking-wide text-slate-300 truncate">
+              {stageLabel}
             </p>
-            <p className="text-xs text-slate-400 truncate">{stageLabel}</p>
+            <h3 className="font-display text-base sm:text-xl font-bold text-white truncate leading-tight">
+              {session.title}
+            </h3>
+            {episodeContext && (
+              <p className="text-xs text-slate-300 truncate">{episodeContext}</p>
+            )}
+            <p className="text-xs text-slate-300 font-mono-tabular truncate">
+              {metadataParts.length > 0
+                ? metadataParts.join(' · ')
+                : 'Selecting Hindi & English audio'}
+            </p>
           </div>
         </div>
 
-        {/* Live Speed & ETA Telemetry Bar */}
-        <div className="flex items-center justify-between gap-3 rounded-2xl bg-white/[0.05] border border-white/10 px-4 py-2.5 text-xs font-mono-tabular">
-          <div className="flex items-center gap-2 text-slate-200">
-            <Gauge className="h-4 w-4 text-sky-400 shrink-0" />
-            <span className="font-semibold">{speedStr}</span>
+        {/* Sleek Cinema Progress Track + Clean Unboxed Telemetry */}
+        <div className="space-y-2">
+          <div className="h-1.5 w-full rounded-full bg-white/10 overflow-hidden relative">
+            {mode === 'p2p' ? (
+              <div
+                className="h-full w-full origin-left rounded-full transition-transform duration-200 ease-out"
+                style={{
+                  transform: `scaleX(${Math.max(0.04, clampedPct / 100)})`,
+                  background: `linear-gradient(90deg, ${accentHex}, #38BDF8)`,
+                }}
+              />
+            ) : (
+              <div
+                className="ks-buffer-sweep h-full w-2/5 rounded-full"
+                style={{
+                  background: `linear-gradient(90deg, transparent, ${accentHex}, #38BDF8, transparent)`,
+                }}
+              />
+            )}
           </div>
-          <div className="text-slate-400">
-            {mbPre} / {mbTarget} MB
-          </div>
-          <div className="font-semibold text-emerald-300">
-            {etaSec !== null ? `~${etaSec}s left` : 'Syncing...'}
+
+          <div className="flex items-center justify-between gap-3 text-xs font-mono-tabular text-slate-300">
+            {mode === 'p2p' ? (
+              <>
+                <div className="flex items-center gap-2 truncate">
+                  <span className="text-white font-semibold">{speedStr}</span>
+                  <span className="text-white/25">·</span>
+                  <span>
+                    {mbPre} / {mbLaunch} MB
+                  </span>
+                  <span className="text-white/25">·</span>
+                  <span>{status?.peers ?? 0} peers</span>
+                  <span className="text-white/25 hidden sm:inline">·</span>
+                  <span className="hidden sm:inline text-emerald-300">
+                    {status?.seeders ?? 0} seeds
+                  </span>
+                </div>
+                <span className="shrink-0 font-semibold text-emerald-300">
+                  {etaSec !== null
+                    ? `~${etaSec}s`
+                    : status?.headReady
+                    ? 'Launching'
+                    : 'Syncing'}
+                </span>
+              </>
+            ) : (
+              <>
+                <span className="truncate text-slate-300">
+                  {activeSource
+                    ? 'Preparing instant stream startup'
+                    : 'Checking verified fast streams'}
+                </span>
+                <span className="shrink-0 text-white font-semibold">
+                  {activeSource?.quality || 'HD'}
+                </span>
+              </>
+            )}
           </div>
         </div>
 
-        {/* Swarm Metrics */}
-        <div className="grid grid-cols-4 gap-2 text-center">
-          <div className="rounded-xl bg-white/[0.04] border border-white/10 py-2.5 px-1">
-            <div className="text-sm font-bold font-mono-tabular text-white">
-              {status?.peers ?? 0}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-0.5">Peers</div>
-          </div>
-          <div className="rounded-xl bg-white/[0.04] border border-white/10 py-2.5 px-1">
-            <div className="text-sm font-bold font-mono-tabular text-emerald-400">
-              {status?.seeders ?? 0}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-0.5">Seeds</div>
-          </div>
-          <div className="rounded-xl bg-white/[0.04] border border-white/10 py-2.5 px-1">
-            <div
-              className={`text-sm font-bold ${
-                status?.headReady ? 'text-emerald-400' : 'text-amber-300'
-              }`}
-            >
-              {status?.headReady ? 'Ready' : 'Wait'}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-0.5">Header</div>
-          </div>
-          <div className="rounded-xl bg-white/[0.04] border border-white/10 py-2.5 px-1">
-            <div
-              className={`text-sm font-bold ${
-                status?.tailReady ? 'text-emerald-400' : 'text-slate-300'
-              }`}
-            >
-              {status?.tailReady ? 'Ready' : 'Wait'}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-0.5">Index</div>
-          </div>
-        </div>
-
-        {/* Action Controls (44px+ Touch Targets) */}
-        <div className="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-2.5 pt-2 border-t border-white/10">
+        {/* Action Row (44px+ Touch Targets) */}
+        <div className="flex items-center justify-between gap-2.5 pt-1">
           <button
             type="button"
             onClick={onCancel}
-            className="min-h-[44px] px-4 rounded-xl bg-white/[0.07] hover:bg-white/[0.15] text-xs font-semibold text-slate-200 transition-colors"
+            className="min-h-[44px] px-4 rounded-xl bg-white/[0.08] hover:bg-white/[0.15] text-xs font-semibold text-slate-200 transition-colors"
           >
             Cancel
           </button>
-          <div className="flex items-center gap-2 flex-1 sm:flex-initial justify-end">
+
+          <div className="flex items-center gap-2 justify-end">
             {hasAlternativeSources && onSwitchServer && (
               <button
                 type="button"
                 onClick={onSwitchServer}
-                className="min-h-[44px] flex-1 sm:flex-initial px-4 rounded-xl bg-white/15 hover:bg-white/25 border border-white/20 text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 transition-colors"
+                className="min-h-[44px] px-4 rounded-xl bg-white/12 hover:bg-white/20 border border-white/15 text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 transition-colors"
               >
                 <Server className="h-4 w-4" />
                 <span>Switch Server</span>
               </button>
             )}
-            <button
-              type="button"
-              onClick={onContinueAnyway}
-              className="min-h-[44px] flex-1 sm:flex-initial px-5 rounded-xl text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 shadow-lg active:scale-95 transition-transform"
-              style={{ backgroundColor: accentHex }}
-            >
-              <Play className="h-4 w-4 fill-current" />
-              <span>Play Now</span>
-            </button>
+            {mode === 'p2p' && onContinueAnyway && (
+              <button
+                type="button"
+                onClick={onContinueAnyway}
+                className="min-h-[44px] px-5 rounded-xl text-xs font-semibold text-white inline-flex items-center justify-center gap-1.5 shadow-lg active:scale-95 transition-transform"
+                style={{ backgroundColor: accentHex }}
+              >
+                <Play className="h-4 w-4 fill-current" />
+                <span>Play Now</span>
+              </button>
+            )}
           </div>
         </div>
       </div>
@@ -513,14 +698,33 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   const controlsTimerRef = useRef<number | null>(null);
   const playPromiseRef = useRef<Promise<void> | null>(null);
   const failedSourceIdsRef = useRef<Set<string>>(new Set());
+  const autoRemuxAttemptedIdsRef = useRef<Set<string>>(new Set());
   const userLockedLanguageRef = useRef<boolean>(false);
   const userSelectedSourceRef = useRef<boolean>(false);
   const hasPlayedFramesRef = useRef<boolean>(false);
   const p2pBypassForSourceRef = useRef<string | null>(null);
+  const readyTorrentHashesRef = useRef<Set<string>>(new Set());
+  const qualityBaseSourceRef = useRef<{
+    id: string;
+    url: string;
+    format: StreamSource['format'];
+    quality: string;
+  } | null>(null);
+  const pendingQualityFallbackRef = useRef<{
+    sourceId: string;
+    qualId: string;
+  } | null>(null);
+  const playerToastTimerRef = useRef<number | null>(null);
   const mountGenRef = useRef<number>(0);
-  const resumePositionRef = useRef<number>(
-    session.initialTime && session.initialTime > 3 ? session.initialTime : 0
-  );
+  const initialResolvedResume = resolveSessionInitialResumeTime(session);
+  const resumePositionRef = useRef<number>(initialResolvedResume);
+  const pendingResumeTargetRef = useRef<number>(initialResolvedResume);
+  const initialResumeToastTargetRef = useRef<number>(initialResolvedResume);
+  const resumedToastShownRef = useRef<boolean>(false);
+  const lastResumeAttemptAtRef = useRef<number>(0);
+  const resumeSeekAttemptsRef = useRef<number>(0);
+  const prematureReconnectCountRef = useRef<number>(0);
+  const seekFeedbackTimerRef = useRef<number | null>(null);
   const lastUiTimeUpdateRef = useRef<number>(0);
 
   const [sources, setSources] = useState<StreamSource[]>([]);
@@ -546,13 +750,21 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const [isPlaying, setIsPlaying] = useState(true);
   const [isBuffering, setIsBuffering] = useState(true);
+  const [hasFirstFrame, setHasFirstFrame] = useState(false);
   const [isResolvingStreams, setIsResolvingStreams] = useState(session.mediaType !== 'live');
   const [showUnmutePrompt, setShowUnmutePrompt] = useState(false);
   const [streamError, setStreamError] = useState<string | null>(null);
   const [liveSwitchToast, setLiveSwitchToast] = useState<string | null>(null);
+  const [resumedNoticeTime, setResumedNoticeTime] = useState<number | null>(null);
+  const [seekFeedback, setSeekFeedback] = useState<{
+    dir: 'back' | 'forward';
+    amount: number;
+    key: number;
+  } | null>(null);
+  const [showRemainingTime, setShowRemainingTime] = useState(false);
   const [activeLiveFeedIdx, setActiveLiveFeedIdx] = useState(0);
   const failedLiveUrlsRef = useRef<Set<string>>(new Set());
-  const [currentTime, setCurrentTime] = useState(session.initialTime || 0);
+  const [currentTime, setCurrentTime] = useState(initialResolvedResume);
   const [seekPreviewTime, setSeekPreviewTime] = useState<number | null>(null);
   const [duration, setDuration] = useState(0);
   const [bufferedEnd, setBufferedEnd] = useState(0);
@@ -570,9 +782,9 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   // In-player Sources drawer filters
   const [drawerTypeFilter, setDrawerTypeFilter] = useState<SourceTypeFilter>('all');
-  const [drawerProviderFilter, setDrawerProviderFilter] = useState<string>('All');
   const [drawerLanguageFilter, setDrawerLanguageFilter] = useState<string>('All');
   const [drawerQualityFilter, setDrawerQualityFilter] = useState<QualityFilter>('all');
+  const [selectedQualityOption, setSelectedQualityOption] = useState<string>('auto');
 
   const sourcesRef = useRef<StreamSource[]>([]);
   useEffect(() => {
@@ -610,12 +822,140 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   const volumeRef = useRef(volume);
   const seekOffsetSecondsRef = useRef<number>(0);
   const [probedDurationSeconds, setProbedDurationSeconds] = useState<number>(0);
+  const [tmdbRuntimeSeconds, setTmdbRuntimeSeconds] = useState<number>(
+    session.runtimeMinutes && session.runtimeMinutes > 0 ? session.runtimeMinutes * 60 : 0
+  );
+
+  const durationRef = useRef(duration);
+  const knownRuntimeRef = useRef(0);
+  const activeSourceUrlRef = useRef(activeSource?.url || '');
 
   useEffect(() => {
     playbackRateRef.current = playbackRate;
     isMutedRef.current = isMuted;
     volumeRef.current = volume;
   }, [playbackRate, isMuted, volume]);
+
+  useEffect(() => {
+    durationRef.current = duration;
+  }, [duration]);
+
+  useEffect(() => {
+    activeSourceUrlRef.current = activeSource?.url || '';
+  }, [activeSource?.url]);
+
+  const initialRuntimeSeconds =
+    session.runtimeMinutes && session.runtimeMinutes > 0 ? session.runtimeMinutes * 60 : 0;
+  const knownRuntimeSeconds = Math.max(
+    initialRuntimeSeconds,
+    probedDurationSeconds,
+    tmdbRuntimeSeconds
+  );
+
+  useEffect(() => {
+    knownRuntimeRef.current = knownRuntimeSeconds;
+  }, [knownRuntimeSeconds]);
+
+  // Ensure TMDB runtime is resolved even when launched from Home / Continue Watching / Catalog without runtimeMinutes
+  useEffect(() => {
+    if (initialRuntimeSeconds > 0) {
+      setTmdbRuntimeSeconds(initialRuntimeSeconds);
+      return;
+    }
+    const isSyntheticLive = session.mediaId >= 880001 && session.mediaId <= 899999;
+    if (isLive || isSyntheticLive || !session.mediaId || session.mediaId <= 0) {
+      setTmdbRuntimeSeconds(0);
+      return;
+    }
+
+    let cancelled = false;
+    (async () => {
+      try {
+        let runtimeMin = 0;
+        if (session.mediaType === 'tv') {
+          if (session.seasonNumber && session.episodeNumber) {
+            const season = await tmdbService.getSeasonDetails(
+              session.mediaId,
+              session.seasonNumber
+            );
+            const ep = season.episodes?.find(
+              (item) => item.episodeNumber === session.episodeNumber
+            );
+            if (ep?.runtime && ep.runtime > 0) {
+              runtimeMin = ep.runtime;
+            }
+          }
+          if (!runtimeMin) {
+            const details = await tmdbService.getMediaDetails(session.mediaId, 'tv');
+            if (details?.runtime && details.runtime > 0) {
+              runtimeMin = details.runtime;
+            }
+          }
+        } else {
+          const details = await tmdbService.getMediaDetails(session.mediaId, 'movie');
+          if (details?.runtime && details.runtime > 0) {
+            runtimeMin = details.runtime;
+          }
+        }
+        if (!cancelled && runtimeMin > 0) {
+          setTmdbRuntimeSeconds(runtimeMin * 60);
+        }
+      } catch {
+        // Ignore non-fatal runtime metadata lookup failure
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    isLive,
+    initialRuntimeSeconds,
+    session.mediaId,
+    session.mediaType,
+    session.seasonNumber,
+    session.episodeNumber,
+  ]);
+
+  const applyReportedDuration = useCallback((rawDur: number) => {
+    if (!Number.isFinite(rawDur) || rawDur <= 0) return;
+    const totalCandidate = seekOffsetSecondsRef.current + rawDur;
+    const curPos =
+      seekOffsetSecondsRef.current + (videoRef.current?.currentTime || 0);
+    const knownRuntime = knownRuntimeRef.current;
+    const currentDur = durationRef.current;
+    const isRemux = isServerRemuxUrl(activeSourceUrlRef.current);
+
+    // Never accept a partial duration shorter than what has already played
+    if (totalCandidate + 0.5 < curPos) return;
+
+    // Ignore tiny chunk/init-fragment durations (e.g. 9s) when full runtime metadata is known
+    if (knownRuntime >= 300 && totalCandidate < Math.min(180, knownRuntime * 0.25)) {
+      return;
+    }
+
+    // Never shrink a valid existing duration down to a short progressive window
+    if (currentDur >= 180 && totalCandidate < Math.min(120, currentDur * 0.25)) {
+      return;
+    }
+
+    if (isRemux) {
+      if (currentDur === 0 || (totalCandidate > currentDur && totalCandidate >= 60)) {
+        durationRef.current = totalCandidate;
+        setDuration(totalCandidate);
+      }
+      return;
+    }
+
+    if (
+      currentDur === 0 ||
+      totalCandidate > currentDur ||
+      Math.abs(totalCandidate - currentDur) >= 1
+    ) {
+      durationRef.current = totalCandidate;
+      setDuration(totalCandidate);
+    }
+  }, []);
 
   useEffect(() => {
     let parsedSs = 0;
@@ -634,10 +974,15 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
     const initialDur =
       session.runtimeMinutes && session.runtimeMinutes > 0 ? session.runtimeMinutes * 60 : 0;
+    const preservedDur =
+      parsedSs > 0
+        ? Math.max(initialDur, knownRuntimeRef.current, durationRef.current)
+        : Math.max(initialDur, knownRuntimeRef.current);
     setProbedDurationSeconds(initialDur);
-    if (initialDur > 0) setDuration(initialDur);
+    durationRef.current = preservedDur;
+    setDuration(preservedDur);
 
-    if (activeSource?.url && !isLive && activeSource.format !== 'hls' && !activeSource.url.includes('remux=1')) {
+    if (activeSource?.url && !isLive && activeSource.format !== 'hls' && !isServerRemuxUrl(activeSource.url)) {
       let probeActive = true;
       fetch(activeSource.url, { method: 'HEAD' })
         .then((res) => {
@@ -656,7 +1001,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
             const parsed = parseFloat(hdr);
             if (Number.isFinite(parsed) && parsed > 0) {
               setProbedDurationSeconds(parsed);
-              setDuration(parsed);
+              applyReportedDuration(parsed);
             }
           }
         })
@@ -665,15 +1010,22 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         probeActive = false;
       };
     }
-  }, [activeSource?.id, activeSource?.url, activeSource?.format, isLive, session.runtimeMinutes]);
+  }, [
+    activeSource?.id,
+    activeSource?.url,
+    activeSource?.format,
+    isLive,
+    session.runtimeMinutes,
+    applyReportedDuration,
+  ]);
 
+  const rawReportedDuration =
+    Number.isFinite(duration) && duration > 0 ? duration : knownRuntimeSeconds;
   const effectiveDuration =
-    Number.isFinite(duration) && duration > 0
-      ? duration
-      : probedDurationSeconds > 0
-      ? probedDurationSeconds
-      : session.runtimeMinutes && session.runtimeMinutes > 0
-      ? session.runtimeMinutes * 60
+    rawReportedDuration > 0 && rawReportedDuration + 0.5 >= currentTime
+      ? rawReportedDuration
+      : knownRuntimeSeconds > 0 && knownRuntimeSeconds + 0.5 >= currentTime
+      ? knownRuntimeSeconds
       : 0;
 
   const switchLiveChannel = useCallback(
@@ -713,13 +1065,26 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   // Reset live backup tracking & resume position only when session identity changes
   const sessionKey = `${session.mediaType}-${session.mediaId}-${session.seasonNumber || 0}-${session.episodeNumber || 0}-${session.liveChannel?.id || ''}`;
   useEffect(() => {
-    resumePositionRef.current =
-      session.initialTime && session.initialTime > 3 ? session.initialTime : 0;
-    setCurrentTime(resumePositionRef.current);
+    const initialResume = resolveSessionInitialResumeTime(session);
+    resumePositionRef.current = initialResume;
+    pendingResumeTargetRef.current = initialResume;
+    initialResumeToastTargetRef.current = initialResume;
+    resumedToastShownRef.current = false;
+    prematureReconnectCountRef.current = 0;
+    resumeSeekAttemptsRef.current = 0;
+    setResumedNoticeTime(null);
+    setCurrentTime(initialResume);
     setActiveLiveFeedIdx(0);
     failedLiveUrlsRef.current.clear();
     setLiveSwitchToast(null);
+    qualityBaseSourceRef.current = null;
+    pendingQualityFallbackRef.current = null;
+    setSelectedQualityOption('auto');
   }, [sessionKey, session.initialTime]);
+
+  useEffect(() => {
+    setHasFirstFrame(false);
+  }, [activeSource?.id, reloadTick, sessionKey]);
 
   // Activate selected Live TV channel or backup feed cleanly
   useEffect(() => {
@@ -759,6 +1124,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   // Resolve stream sources & subtitles progressively via shared subscription
   useEffect(() => {
     failedSourceIdsRef.current.clear();
+    autoRemuxAttemptedIdsRef.current.clear();
     userLockedLanguageRef.current = false;
     userSelectedSourceRef.current = Boolean(session.preferredSourceId);
     hasPlayedFramesRef.current = false;
@@ -768,7 +1134,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     setStreamError(null);
     setIsBuffering(true);
     setDrawerTypeFilter('all');
-    setDrawerProviderFilter('All');
+    setSelectedQualityOption('auto');
     setDrawerLanguageFilter('All');
     setDrawerQualityFilter('all');
 
@@ -826,6 +1192,34 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         void syncSubtitles(nextSubs);
       }
 
+      const getActiveResumeSeconds = () => {
+        const videoCur = videoRef.current?.currentTime || 0;
+        const absCur = seekOffsetSecondsRef.current + videoCur;
+        if (pendingResumeTargetRef.current > 3 && seekOffsetSecondsRef.current === 0 && videoCur < 3) {
+          return Math.max(resumePositionRef.current, pendingResumeTargetRef.current);
+        }
+        return Math.max(absCur, resumePositionRef.current, pendingResumeTargetRef.current);
+      };
+
+      const prepareWithResume = (src: StreamSource): StreamSource => {
+        if (isLive) return src;
+        const target = Math.floor(getActiveResumeSeconds());
+        if (target <= 3) {
+          seekOffsetSecondsRef.current = 0;
+          pendingResumeTargetRef.current = 0;
+          return src;
+        }
+        resumePositionRef.current = target;
+        if (isServerRemuxUrl(src.url)) {
+          seekOffsetSecondsRef.current = target;
+          pendingResumeTargetRef.current = 0;
+          return { ...src, url: buildUrlWithSeekParam(src.url, target) };
+        }
+        seekOffsetSecondsRef.current = 0;
+        pendingResumeTargetRef.current = target;
+        return src;
+      };
+
       const currentActive = activeSourceRef.current;
       const bestNow = selectBestPlayableSource(
         allowedSources,
@@ -836,7 +1230,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
       if (!currentActive || (isBengaliSession && currentActive.format === 'youtube')) {
         if (bestNow) {
-          setActiveSource(bestNow);
+          setActiveSource(prepareWithResume(bestNow));
         } else if (isDone) {
           if (isBengaliSession) {
             setActiveSource(null);
@@ -848,7 +1242,13 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
               : 'No playable stream servers were found for this title.'
           );
         }
-      } else if (!userSelectedSourceRef.current && !hasPlayedFramesRef.current && bestNow) {
+      } else if (
+        !userSelectedSourceRef.current &&
+        !hasPlayedFramesRef.current &&
+        !qualityBaseSourceRef.current &&
+        !pendingQualityFallbackRef.current &&
+        bestNow
+      ) {
         const curIsP2POrEmbed =
           currentActive.url.includes('/api/torrent/stream') ||
           currentActive.format === 'embed' ||
@@ -861,7 +1261,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         const bestIsHindi = /\b(hindi|hin)\b|🇮🇳/i.test(bestNow.audioLanguage || '');
 
         if ((curIsP2POrEmbed && bestIsDirect) || (!curIsHindi && bestIsHindi && bestIsDirect)) {
-          setActiveSource(bestNow);
+          setActiveSource(prepareWithResume(bestNow));
         }
       }
     };
@@ -897,14 +1297,110 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     };
   }, [session, isLive, isBengaliSession]);
 
-  // Persist watch progress helper
+  const getAbsolutePlaybackPosition = useCallback((): number => {
+    const rawTime = videoRef.current?.currentTime || 0;
+    const absCur = seekOffsetSecondsRef.current + rawTime;
+    if (
+      pendingResumeTargetRef.current > 3 &&
+      seekOffsetSecondsRef.current === 0 &&
+      rawTime < 3
+    ) {
+      return Math.max(resumePositionRef.current, pendingResumeTargetRef.current);
+    }
+    return Math.max(absCur, resumePositionRef.current);
+  }, []);
+
+  const prepareSourceWithResume = useCallback(
+    (src: StreamSource, explicitSeconds?: number): StreamSource => {
+      if (isLive || src.format === 'youtube' || src.format === 'embed') {
+        seekOffsetSecondsRef.current = 0;
+        pendingResumeTargetRef.current = 0;
+        return src;
+      }
+      const target = Math.floor(
+        explicitSeconds !== undefined ? explicitSeconds : getAbsolutePlaybackPosition()
+      );
+      if (target <= 3) {
+        seekOffsetSecondsRef.current = 0;
+        pendingResumeTargetRef.current = 0;
+        return isServerRemuxUrl(src.url)
+          ? { ...src, url: stripSeekParam(src.url) }
+          : src;
+      }
+      resumePositionRef.current = target;
+      if (isServerRemuxUrl(src.url)) {
+        seekOffsetSecondsRef.current = target;
+        pendingResumeTargetRef.current = 0;
+        resumeSeekAttemptsRef.current = 0;
+        return {
+          ...src,
+          url: buildUrlWithSeekParam(src.url, target),
+        };
+      }
+      seekOffsetSecondsRef.current = 0;
+      pendingResumeTargetRef.current = target;
+      resumeSeekAttemptsRef.current = 0;
+      return src;
+    },
+    [isLive, getAbsolutePlaybackPosition]
+  );
+
+  const tryApplyResumeSeek = useCallback(
+    (video: HTMLVideoElement | null): boolean => {
+      if (!video || isLive) return false;
+      if (seekOffsetSecondsRef.current > 0) {
+        pendingResumeTargetRef.current = 0;
+        return false;
+      }
+      const target = pendingResumeTargetRef.current;
+      if (!Number.isFinite(target) || target <= 3) return false;
+      if (video.readyState < 1) return false;
+
+      if (Number.isFinite(video.duration) && video.duration >= 10 && target >= video.duration - 2) {
+        pendingResumeTargetRef.current = 0;
+        return false;
+      }
+
+      const cur = video.currentTime || 0;
+      if (Math.abs(cur - target) <= 4) {
+        pendingResumeTargetRef.current = 0;
+        resumeSeekAttemptsRef.current = 0;
+        return false;
+      }
+
+      const now = performance.now();
+      if (now - lastResumeAttemptAtRef.current < 300) {
+        return false;
+      }
+      if (resumeSeekAttemptsRef.current >= 10) {
+        pendingResumeTargetRef.current = 0;
+        return false;
+      }
+
+      lastResumeAttemptAtRef.current = now;
+      resumeSeekAttemptsRef.current += 1;
+      try {
+        video.currentTime = target;
+        setCurrentTime(target);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [isLive]
+  );
+
+  // Persist watch progress helper (never drops progress when stream duration isn't reported yet)
   const persistProgress = useCallback(
     (timeVal: number, durVal: number) => {
-      if (isLive || durVal <= 5 || timeVal < 3) return;
-      const key =
-        session.mediaType === 'tv'
-          ? `tv-${session.mediaId}-s${session.seasonNumber || 1}e${session.episodeNumber || 1}`
-          : `movie-${session.mediaId}`;
+      if (isLive || timeVal < 3) return;
+      const safeDuration =
+        Number.isFinite(durVal) && durVal > 5
+          ? durVal
+          : knownRuntimeRef.current > 5
+          ? knownRuntimeRef.current
+          : Math.max(timeVal + 300, 600);
+      const key = getWatchProgressKeyForSession(session);
 
       saveWatchProgress({
         key,
@@ -919,46 +1415,53 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         episodeNumber: session.episodeNumber,
         episodeTitle: session.episodeTitle,
         currentTime: timeVal,
-        duration: durVal,
+        duration: safeDuration,
         updatedAt: Date.now(),
       });
     },
     [isLive, session, saveWatchProgress]
   );
 
-  const safePlay = useCallback(async (video: HTMLVideoElement) => {
-    try {
-      const promise = video.play();
-      playPromiseRef.current = promise;
-      await promise;
-      setIsPlaying(true);
-      setIsBuffering(false);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === 'AbortError') {
-        return;
-      }
-      if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'NotSupportedError')) {
-        try {
-          video.muted = true;
-          isMutedRef.current = true;
-          setIsMuted(true);
-          setShowUnmutePrompt(true);
-          const mutedPromise = video.play();
-          playPromiseRef.current = mutedPromise;
-          await mutedPromise;
-          setIsPlaying(true);
-          setIsBuffering(false);
+  const safePlay = useCallback(
+    async (video: HTMLVideoElement) => {
+      try {
+        tryApplyResumeSeek(video);
+        const promise = video.play();
+        playPromiseRef.current = promise;
+        await promise;
+        tryApplyResumeSeek(video);
+        setIsPlaying(true);
+        setIsBuffering(false);
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') {
           return;
-        } catch {
-          // Fall through if even muted playback is disallowed
         }
+        if (err instanceof DOMException && (err.name === 'NotAllowedError' || err.name === 'NotSupportedError')) {
+          try {
+            video.muted = true;
+            isMutedRef.current = true;
+            setIsMuted(true);
+            setShowUnmutePrompt(true);
+            tryApplyResumeSeek(video);
+            const mutedPromise = video.play();
+            playPromiseRef.current = mutedPromise;
+            await mutedPromise;
+            tryApplyResumeSeek(video);
+            setIsPlaying(true);
+            setIsBuffering(false);
+            return;
+          } catch {
+            // Fall through if even muted playback is disallowed
+          }
+        }
+        setIsPlaying(false);
+        setIsBuffering(false);
+      } finally {
+        playPromiseRef.current = null;
       }
-      setIsPlaying(false);
-      setIsBuffering(false);
-    } finally {
-      playPromiseRef.current = null;
-    }
-  }, []);
+    },
+    [tryApplyResumeSeek]
+  );
 
   const safePause = useCallback(
     async (video: HTMLVideoElement) => {
@@ -971,11 +1474,12 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       }
       video.pause();
       setIsPlaying(false);
-      const cur = seekOffsetSecondsRef.current + (video.currentTime || 0);
+      const cur = getAbsolutePlaybackPosition();
       const dur = effectiveDuration > 0 ? effectiveDuration : video.duration;
+      if (cur > 3) resumePositionRef.current = cur;
       persistProgress(cur, dur);
     },
-    [effectiveDuration, persistProgress]
+    [effectiveDuration, persistProgress, getAbsolutePlaybackPosition]
   );
 
   const isActiveP2PTorrent = Boolean(
@@ -985,6 +1489,60 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       activeSource.url.includes('/api/torrent/stream') &&
       !activeSource.url.includes('p2p=0')
   );
+
+  const tryAutoRemuxUpgrade = useCallback(
+    (source: StreamSource | null): boolean => {
+      if (!source || isLive) return false;
+      if (source.format === 'youtube' || source.format === 'embed' || source.format === 'hls') {
+        return false;
+      }
+      if (isServerRemuxUrl(source.url) || autoRemuxAttemptedIdsRef.current.has(source.id)) {
+        return false;
+      }
+      const resumeAt = Math.floor(getAbsolutePlaybackPosition());
+      let upgradedUrl = '';
+      if (source.url.includes('/api/torrent/stream') || source.url.includes('/api/stream-proxy')) {
+        const sep = source.url.includes('?') ? '&' : '?';
+        upgradedUrl = `${source.url}${sep}remux=1`;
+      } else if (source.url.startsWith('http://') || source.url.startsWith('https://')) {
+        upgradedUrl = `/api/stream-proxy?url=${encodeURIComponent(source.url)}&remux=1`;
+      } else {
+        return false;
+      }
+
+      if (resumeAt > 3) {
+        upgradedUrl = buildUrlWithSeekParam(upgradedUrl, resumeAt);
+        resumePositionRef.current = resumeAt;
+        seekOffsetSecondsRef.current = resumeAt;
+        pendingResumeTargetRef.current = 0;
+      }
+
+      autoRemuxAttemptedIdsRef.current.add(source.id);
+      if (upgradedUrl.includes('/api/torrent/stream')) {
+        p2pBypassForSourceRef.current = source.id;
+      }
+      const upgradedSource: StreamSource = {
+        ...source,
+        url: upgradedUrl,
+        format: 'mp4',
+      };
+      setSources((prev) => prev.map((s) => (s.id === source.id ? upgradedSource : s)));
+      setActiveSource(upgradedSource);
+      return true;
+    },
+    [isLive, getAbsolutePlaybackPosition]
+  );
+
+  const showPlayerToast = useCallback((message: string, durationMs = 3200) => {
+    if (playerToastTimerRef.current !== null) {
+      window.clearTimeout(playerToastTimerRef.current);
+    }
+    setLiveSwitchToast(message);
+    playerToastTimerRef.current = window.setTimeout(() => {
+      setLiveSwitchToast(null);
+      playerToastTimerRef.current = null;
+    }, durationMs);
+  }, []);
 
   const handlePlaybackFailure = useCallback(
     (source: StreamSource | null, errorMsg: string) => {
@@ -998,16 +1556,56 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
             (feed, idx) => idx !== activeLiveFeedIdx && !failedLiveUrlsRef.current.has(feed.streamUrl)
           );
           if (nextIdx >= 0) {
-            setLiveSwitchToast(
-              `Feed ${activeLiveFeedIdx + 1} unavailable · Switching to backup feed ${nextIdx + 1}...`
+            showPlayerToast(
+              `Feed ${activeLiveFeedIdx + 1} unavailable · Switching to backup feed ${nextIdx + 1}...`,
+              2400
             );
-            window.setTimeout(() => setLiveSwitchToast(null), 2400);
             setActiveLiveFeedIdx(nextIdx);
             return;
           }
         }
       }
       if (source && !isLive) {
+        const curPos = getAbsolutePlaybackPosition();
+        if (curPos > 3) {
+          resumePositionRef.current = curPos;
+        }
+
+        // If a user-requested quality transcode failed, revert cleanly to original quality on the SAME server
+        if (
+          pendingQualityFallbackRef.current &&
+          pendingQualityFallbackRef.current.sourceId === source.id
+        ) {
+          const failedQual = pendingQualityFallbackRef.current.qualId;
+          pendingQualityFallbackRef.current = null;
+          const base = qualityBaseSourceRef.current;
+          qualityBaseSourceRef.current = null;
+          setSelectedQualityOption('auto');
+          const restoredSource: StreamSource =
+            base && base.id === source.id
+              ? {
+                  ...source,
+                  url: base.url,
+                  format: base.format,
+                  quality: base.quality,
+                }
+              : {
+                  ...source,
+                  url: source.url
+                    .replace(/([?&])quality=[^&]*/g, '$1')
+                    .replace(/\?&/, '?')
+                    .replace(/[?&]$/, ''),
+                };
+          if (restoredSource.url.includes('/api/torrent/stream')) {
+            p2pBypassForSourceRef.current = restoredSource.id;
+          }
+          setStreamError(null);
+          setIsBuffering(true);
+          setActiveSource(prepareSourceWithResume(restoredSource, curPos));
+          showPlayerToast(`${failedQual.toUpperCase()} unavailable · Playing original quality`);
+          return;
+        }
+
         failedSourceIdsRef.current.add(source.id);
         const pool = isBengaliSession
           ? sourcesRef.current.filter((s) => s.format !== 'youtube')
@@ -1026,13 +1624,17 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
             : null;
           const anyLangFallback =
             sameLangFallback ||
-            (!userLockedLanguageRef.current &&
-            (!source.audioLanguage || source.audioLanguage === 'Original')
+            (!userLockedLanguageRef.current
               ? selectMostCompatibleSource(pool, failedSourceIdsRef.current, undefined, true) ||
-                selectMostCompatibleSource(pool, failedSourceIdsRef.current, undefined, false)
+                selectMostCompatibleSource(pool, failedSourceIdsRef.current, undefined, false) ||
+                pool.find((s) => !failedSourceIdsRef.current.has(s.id) && s.id !== source.id) ||
+                null
               : null);
           if (anyLangFallback && anyLangFallback.id !== source.id) {
-            setActiveSource(anyLangFallback);
+            qualityBaseSourceRef.current = null;
+            pendingQualityFallbackRef.current = null;
+            setSelectedQualityOption('auto');
+            setActiveSource(prepareSourceWithResume(anyLangFallback, curPos));
             return;
           }
         }
@@ -1044,7 +1646,17 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       );
       setIsBuffering(false);
     },
-    [isLive, isBengaliSession, session.liveChannel, liveFeedsList, activeLiveFeedIdx, markChannelHealth]
+    [
+      isLive,
+      isBengaliSession,
+      session.liveChannel,
+      liveFeedsList,
+      activeLiveFeedIdx,
+      markChannelHealth,
+      getAbsolutePlaybackPosition,
+      prepareSourceWithResume,
+      showPlayerToast,
+    ]
   );
 
   // P2P Torrent preparation + sequential pre-buffering status polling before attaching <video>
@@ -1055,16 +1667,6 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       return;
     }
 
-    if (p2pBypassForSourceRef.current === activeSource.id) {
-      setP2pAttachUrl(activeSource.url);
-      return;
-    }
-
-    let cancelled = false;
-    setP2pAttachUrl(null);
-    setStreamError(null);
-    setIsBuffering(true);
-
     let parsedUrl: URL;
     try {
       parsedUrl = new URL(activeSource.url, window.location.origin);
@@ -1073,7 +1675,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       return;
     }
 
-    const infoHash = parsedUrl.searchParams.get('infoHash') || '';
+    const infoHash = (parsedUrl.searchParams.get('infoHash') || '').toLowerCase();
     const fileIdx = parsedUrl.searchParams.get('fileIdx');
     const season = parsedUrl.searchParams.get('season');
     const episode = parsedUrl.searchParams.get('episode');
@@ -1084,6 +1686,19 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       setP2pAttachUrl(activeSource.url);
       return;
     }
+
+    if (
+      p2pBypassForSourceRef.current === activeSource.id ||
+      readyTorrentHashesRef.current.has(infoHash)
+    ) {
+      setP2pAttachUrl(activeSource.url);
+      return;
+    }
+
+    let cancelled = false;
+    setP2pAttachUrl(null);
+    setStreamError(null);
+    setIsBuffering(true);
 
     const baseParams = new URLSearchParams({
       infoHash,
@@ -1106,18 +1721,26 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       prebufferMb,
       prebufferedBytes: 0,
       targetBytes: Math.max(2, Math.min(30, prebufferMb)) * 1024 * 1024,
+      minReadyBytes: 512 * 1024,
       headReady: false,
       tailReady: false,
       progressPct: 0,
+      launchProgressPct: 0,
       readyToPlay: false,
     });
 
     const controller = new AbortController();
     const startTimeMs = Date.now();
     let pollTimer: number | null = null;
+    let initialPollTimer: number | null = null;
     let maxWaitTimer: number | null = null;
+    let pollInFlight = false;
 
     const stopTimers = () => {
+      if (initialPollTimer !== null) {
+        window.clearTimeout(initialPollTimer);
+        initialPollTimer = null;
+      }
       if (pollTimer !== null) {
         window.clearInterval(pollTimer);
         pollTimer = null;
@@ -1129,7 +1752,8 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     };
 
     const pollStatus = async () => {
-      if (cancelled) return;
+      if (cancelled || pollInFlight) return;
+      pollInFlight = true;
       try {
         const res = await fetch(`/api/torrent/status?${baseParams.toString()}`, {
           signal: controller.signal,
@@ -1144,14 +1768,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         );
         if (
           data.readyToPlay ||
-          (data.headReady && (data.prebufferedBytes >= 1024 * 1024 || elapsedMs >= 3500))
+          data.headReady ||
+          (data.ready && data.prebufferedBytes >= 256 * 1024 && (data.peers > 0 || elapsedMs >= 6000))
         ) {
+          readyTorrentHashesRef.current.add(infoHash);
           stopTimers();
           setP2pAttachUrl(activeSource.url);
           return;
         }
-        // Fail fast if swarm has zero reachable peers and alternative direct servers exist
-        if (elapsedMs >= 4500 && data.peers === 0 && hasDirectMirrors) {
+        // Fail fast only after tracker discovery window if swarm has zero reachable peers and direct mirrors exist
+        if (elapsedMs >= 11000 && !data.ready && data.peers === 0 && hasDirectMirrors) {
           stopTimers();
           controller.abort();
           handlePlaybackFailure(
@@ -1161,12 +1787,18 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         }
       } catch {
         // Ignore transient status poll aborts
+      } finally {
+        pollInFlight = false;
       }
     };
 
+    initialPollTimer = window.setTimeout(() => {
+      void pollStatus();
+    }, 150);
+
     pollTimer = window.setInterval(() => {
       void pollStatus();
-    }, 850);
+    }, 300);
 
     maxWaitTimer = window.setTimeout(() => {
       if (cancelled) return;
@@ -1176,11 +1808,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         activeSource,
         'P2P torrent swarm has too few peers or timed out while pre-buffering. Click Play Now or switch to a direct server.'
       );
-    }, 15000);
+    }, 45000);
 
     const runPrepare = async () => {
       try {
-        const prepareTimer = window.setTimeout(() => controller.abort(), 38000);
+        const prepareTimer = window.setTimeout(() => controller.abort(), 45000);
         const res = await fetch(`/api/torrent/prepare?${prepareParams.toString()}`, {
           method: 'POST',
           signal: controller.signal,
@@ -1202,8 +1834,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         const elapsedMs = Date.now() - startTimeMs;
         if (
           data.readyToPlay ||
-          (data.headReady && (data.prebufferedBytes >= 1024 * 1024 || elapsedMs >= 3500))
+          data.headReady ||
+          (data.ready && (data.prebufferedBytes >= 256 * 1024 || elapsedMs >= 1600))
         ) {
+          readyTorrentHashesRef.current.add(infoHash);
           stopTimers();
           setP2pAttachUrl(activeSource.url);
         }
@@ -1264,9 +1898,24 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       hlsRef.current = null;
     }
 
-    const hasServerSeekParam = /[?&]ss=\d+/i.test(activeSource.url);
+    let parsedSs = 0;
+    try {
+      const parsedActive = new URL(activeSource.url, window.location.origin);
+      const ssVal = Number(parsedActive.searchParams.get('ss') || '0');
+      if (Number.isFinite(ssVal) && ssVal > 0) parsedSs = Math.floor(ssVal);
+    } catch {
+      // Ignore malformed URL
+    }
+    seekOffsetSecondsRef.current = parsedSs;
+
+    const candidateResume = Math.max(
+      resumePositionRef.current,
+      pendingResumeTargetRef.current
+    );
     const startTime =
-      !hasServerSeekParam && resumePositionRef.current > 3 ? resumePositionRef.current : 0;
+      parsedSs === 0 && candidateResume > 3 ? candidateResume : 0;
+    pendingResumeTargetRef.current = startTime > 3 ? startTime : 0;
+    resumeSeekAttemptsRef.current = 0;
 
     const clearStallTimer = () => {
       if (startupStallTimer !== null) {
@@ -1301,13 +1950,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     const handleLoadedMetadata = () => {
       if (cancelled) return;
       clearStallTimer();
-      if (
-        !isLive &&
-        startTime > 0 &&
-        (video.duration > startTime + 2 || effectiveDuration > startTime + 2)
-      ) {
-        video.currentTime = startTime;
+      if (Number.isFinite(video.duration) && video.duration > 0) {
+        applyReportedDuration(video.duration);
       }
+      tryApplyResumeSeek(video);
       video.playbackRate = playbackRateRef.current;
       video.muted = isMutedRef.current;
       video.volume = isMutedRef.current ? 0 : volumeRef.current;
@@ -1326,20 +1972,31 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           !failedSourceIdsRef.current.has(s.id) &&
           !s.url.includes('/api/torrent/stream')
       );
-    const isRemuxSrc = activeSource.url.includes('remux=1');
-    const stallBudgetMs = hasAltLiveFeeds
-      ? 1500
+    const isRemuxSrc = isServerRemuxUrl(activeSource.url);
+    const isQualitySwitching =
+      pendingQualityFallbackRef.current?.sourceId === activeSource.id;
+    const stallBudgetMs = isLive
+      ? 18000
+      : isQualitySwitching
+      ? 26000
+      : isActiveP2PTorrent
+      ? isRemuxSrc
+        ? 26000
+        : 18000
       : hasAltVodMirrors
       ? isRemuxSrc
-        ? 11500
-        : 7500
+        ? 18000
+        : 8500
       : isRemuxSrc
-      ? 16000
-      : 11000;
+      ? 22000
+      : 12000;
 
     startupStallTimer = window.setTimeout(() => {
       if (cancelled) return;
       if (video.readyState < 2) {
+        if (tryAutoRemuxUpgrade(activeSource)) {
+          return;
+        }
         handlePlaybackFailure(
           activeSource,
           isLive
@@ -1356,6 +2013,9 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       if (cancelled || hlsActiveRef.current) return;
       if (!video.getAttribute('src')) return;
       clearStallTimer();
+      if (tryAutoRemuxUpgrade(activeSource)) {
+        return;
+      }
       handlePlaybackFailure(
         activeSource,
         isLive
@@ -1396,16 +2056,17 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       const hls = new Hls({
         enableWorker: true,
         lowLatencyMode: isLive,
+        startFragPrefetch: true,
         startPosition: !isLive && startTime > 3 ? startTime : -1,
         backBufferLength: 60,
         maxBufferSize: bufferMb * 1024 * 1024,
         maxBufferLength: hlsMaxLen,
         maxMaxBufferLength: hlsMaxMaxLen,
-        manifestLoadingTimeOut: isLive && liveFeedsList.length > 1 ? 3500 : 7500,
-        fragLoadingTimeOut: isLive && liveFeedsList.length > 1 ? 4500 : 10000,
-        manifestLoadingMaxRetry: isLive && liveFeedsList.length > 1 ? 0 : 1,
-        levelLoadingMaxRetry: isLive && liveFeedsList.length > 1 ? 0 : 1,
-        fragLoadingMaxRetry: isLive && liveFeedsList.length > 1 ? 1 : 2,
+        manifestLoadingTimeOut: isLive ? 14000 : 6500,
+        fragLoadingTimeOut: isLive ? 18000 : 8500,
+        manifestLoadingMaxRetry: isLive ? 5 : 1,
+        levelLoadingMaxRetry: isLive ? 5 : 1,
+        fragLoadingMaxRetry: isLive ? 8 : 2,
       });
       hlsRef.current = hls;
       localHls = hls;
@@ -1485,7 +2146,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         if (cancelled || isLive) return;
         const totalDur = data.details?.totalduration;
         if (totalDur && Number.isFinite(totalDur) && totalDur > 0 && !data.details?.live) {
-          setDuration(totalDur);
+          applyReportedDuration(totalDur);
         }
       });
 
@@ -1567,7 +2228,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         cleanupMedia();
       }
     };
-  }, [activeSource, p2pAttachUrl, isActiveP2PTorrent, isLive, liveFeedsList.length, safePlay, reloadTick, handlePlaybackFailure]);
+  }, [activeSource, p2pAttachUrl, isActiveP2PTorrent, isLive, liveFeedsList.length, safePlay, reloadTick, handlePlaybackFailure, tryAutoRemuxUpgrade]);
 
   // Helper to resolve shifted subtitle cues cleanly (supports remux ?ss=N offset)
   const syncOffsetCueText = useCallback(
@@ -1650,21 +2311,39 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     };
   }, [activeSubtitleId, subtitles, resolvedSubUrls, syncOffsetCueText]);
 
-  // Auto-save playback progress every 5 seconds (batched writes)
+  // Auto-save playback progress every 4 seconds + immediately on tab hide/page leave/unmount
   useEffect(() => {
     if (isLive) return;
-    const interval = window.setInterval(() => {
+    const flushProgress = () => {
       const video = videoRef.current;
-      const cur = seekOffsetSecondsRef.current + (video?.currentTime || 0);
+      const cur = getAbsolutePlaybackPosition();
       const dur = effectiveDuration > 0 ? effectiveDuration : (video?.duration || 0);
-      if (video && !video.paused && dur > 0) {
+      if (cur >= 3) {
         persistProgress(cur, dur);
       }
-    }, 5000);
-    return () => window.clearInterval(interval);
-  }, [isLive, effectiveDuration, persistProgress]);
+    };
+    const interval = window.setInterval(() => {
+      const video = videoRef.current;
+      if (video && !video.paused) {
+        flushProgress();
+      }
+    }, 4000);
+    const handleVisibilityOrHide = () => {
+      if (document.visibilityState === 'hidden') {
+        flushProgress();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibilityOrHide);
+    window.addEventListener('pagehide', flushProgress);
+    return () => {
+      window.clearInterval(interval);
+      document.removeEventListener('visibilitychange', handleVisibilityOrHide);
+      window.removeEventListener('pagehide', flushProgress);
+      flushProgress();
+    };
+  }, [isLive, effectiveDuration, persistProgress, getAbsolutePlaybackPosition]);
 
-  // Ongoing playback stall detector: auto-switch VOD server after 4s or Live feed after 1.5s
+  // Ongoing playback stall detector: auto-switch VOD server after 25s or Live feed after 1.5s
   useEffect(() => {
     if (!isBuffering || !isPlaying || streamError || (isActiveP2PTorrent && p2pAttachUrl !== activeSource?.url)) {
       return;
@@ -1679,7 +2358,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         );
     if (!canFailover || !activeSource) return;
 
-    const timeoutMs = isLive ? 1500 : 25000;
+    const timeoutMs = isLive
+      ? 1500
+      : isServerRemuxUrl(activeSource.url)
+      ? 35000
+      : 25000;
     const timer = window.setTimeout(() => {
       const video = videoRef.current;
       if (!video || video.paused || video.readyState >= 3) return;
@@ -1730,12 +2413,23 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     const video = videoRef.current;
     if (!video) return;
     if (video.paused) {
+      if (
+        !isLive &&
+        (video.ended ||
+          (seekOffsetSecondsRef.current === 0 &&
+            (video.currentTime || 0) < 1 &&
+            resumePositionRef.current > 5))
+      ) {
+        pendingResumeTargetRef.current = resumePositionRef.current;
+        resumeSeekAttemptsRef.current = 0;
+        tryApplyResumeSeek(video);
+      }
       void safePlay(video);
     } else {
       void safePause(video);
     }
     wakeControls();
-  }, [safePlay, safePause, wakeControls]);
+  }, [isLive, safePlay, safePause, tryApplyResumeSeek, wakeControls]);
 
   const seekToSeconds = useCallback(
     (rawTarget: number) => {
@@ -1744,12 +2438,13 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       const maxDuration = effectiveDuration > 0 ? effectiveDuration : Infinity;
       const target = Math.min(maxDuration, Math.max(0, rawTarget));
       resumePositionRef.current = target;
+      pendingResumeTargetRef.current = 0;
+      resumeSeekAttemptsRef.current = 0;
+      setResumedNoticeTime(null);
 
-      if (activeSource?.url.includes('remux=1')) {
-        const baseUrl = activeSource.url.replace(/[?&]ss=\d+/gi, '').replace(/\?&/, '?');
-        const sep = baseUrl.includes('?') ? '&' : '?';
-        const seekUrl = `${baseUrl}${sep}ss=${Math.floor(target)}`;
-        seekOffsetSecondsRef.current = Math.floor(target);
+      if (isServerRemuxUrl(activeSource?.url) && activeSource) {
+        const seekUrl = buildUrlWithSeekParam(activeSource.url, target);
+        seekOffsetSecondsRef.current = target > 3 ? Math.floor(target) : 0;
         setCurrentTime(target);
         setIsBuffering(true);
         const updatedSource: StreamSource = { ...activeSource, url: seekUrl };
@@ -1766,10 +2461,21 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const seekBy = useCallback(
     (delta: number) => {
-      const current = seekOffsetSecondsRef.current + (videoRef.current?.currentTime || currentTime);
+      const current = getAbsolutePlaybackPosition();
       seekToSeconds(current + delta);
+      if (seekFeedbackTimerRef.current !== null) {
+        window.clearTimeout(seekFeedbackTimerRef.current);
+      }
+      setSeekFeedback({
+        dir: delta < 0 ? 'back' : 'forward',
+        amount: Math.abs(delta),
+        key: Date.now(),
+      });
+      seekFeedbackTimerRef.current = window.setTimeout(() => {
+        setSeekFeedback(null);
+      }, 650);
     },
-    [currentTime, seekToSeconds]
+    [getAbsolutePlaybackPosition, seekToSeconds]
   );
 
   const toggleMute = useCallback(() => {
@@ -1809,16 +2515,17 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const handleClose = useCallback(() => {
     const video = videoRef.current;
+    const cur = getAbsolutePlaybackPosition();
     const dur = effectiveDuration > 0 ? effectiveDuration : (video?.duration || 0);
-    if (video && dur > 0) {
-      persistProgress(seekOffsetSecondsRef.current + (video.currentTime || 0), dur);
+    if (cur >= 3) {
+      persistProgress(cur, dur);
     }
     if (document.fullscreenElement) {
       void document.exitFullscreen().catch(() => {});
     }
     void nativeAndroidBridge.setPlayerFullscreen(false, false);
     closePlayback();
-  }, [closePlayback, effectiveDuration, persistProgress]);
+  }, [closePlayback, effectiveDuration, persistProgress, getAbsolutePlaybackPosition]);
 
   // Auto-lock screen orientation to landscape and request fullscreen when playing any video
   useEffect(() => {
@@ -1920,6 +2627,97 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     }
   };
 
+  const handleSelectQuality = (qualId: string) => {
+    setSelectedQualityOption(qualId);
+    setOpenMenu('none');
+
+    if (!activeSource) return;
+
+    const curPos = getAbsolutePlaybackPosition();
+    if (curPos > 3) resumePositionRef.current = curPos;
+
+    // Remember the original unmodified stream (including its native 'hls' or 'mp4' format)
+    if (!qualityBaseSourceRef.current || qualityBaseSourceRef.current.id !== activeSource.id) {
+      qualityBaseSourceRef.current = {
+        id: activeSource.id,
+        url: stripSeekParam(activeSource.url),
+        format: activeSource.format,
+        quality: activeSource.quality,
+      };
+    }
+
+    const base = qualityBaseSourceRef.current;
+
+    if (qualId === 'auto') {
+      pendingQualityFallbackRef.current = null;
+      qualityBaseSourceRef.current = null;
+      if (base.url.includes('/api/torrent/stream')) {
+        p2pBypassForSourceRef.current = activeSource.id;
+      }
+      const prepared = prepareSourceWithResume(
+        {
+          ...activeSource,
+          url: base.url,
+          format: base.format,
+          quality: base.quality || 'Auto',
+        },
+        curPos
+      );
+      setStreamError(null);
+      setIsBuffering(true);
+      setActiveSource(prepared);
+      return;
+    }
+
+    let targetUrl = base.url;
+    if (!targetUrl.includes('/api/stream-proxy') && !targetUrl.includes('/api/torrent/stream')) {
+      targetUrl = `/api/stream-proxy?url=${encodeURIComponent(targetUrl)}&remux=1&quality=${qualId}`;
+    } else {
+      if (targetUrl.includes('/api/stream-proxy') && !/[?&]remux=/.test(targetUrl)) {
+        const sep = targetUrl.includes('?') ? '&' : '?';
+        targetUrl = `${targetUrl}${sep}remux=1`;
+      }
+      if (/[?&]quality=/.test(targetUrl)) {
+        targetUrl = targetUrl.replace(/([?&]quality=)[^&]*/, `$1${qualId}`);
+      } else {
+        const sep = targetUrl.includes('?') ? '&' : '?';
+        targetUrl = `${targetUrl}${sep}quality=${qualId}`;
+      }
+    }
+
+    if (targetUrl.includes('/api/torrent/stream')) {
+      try {
+        const parsed = new URL(targetUrl, window.location.origin);
+        const hash = (parsed.searchParams.get('infoHash') || '').toLowerCase();
+        if (
+          p2pStatus?.ready ||
+          p2pStatus?.headReady ||
+          (hash && readyTorrentHashesRef.current.has(hash))
+        ) {
+          p2pBypassForSourceRef.current = activeSource.id;
+        }
+      } catch {
+        // Ignore URL parse issues
+      }
+    }
+
+    // Server quality transcoding always outputs fragmented MP4, so update format from 'hls' -> 'mp4'
+    // and mark pending fallback so scaling errors revert to Auto on the SAME server instead of jumping providers.
+    pendingQualityFallbackRef.current = { sourceId: activeSource.id, qualId };
+    const prepared = prepareSourceWithResume(
+      {
+        ...activeSource,
+        url: targetUrl,
+        format: 'mp4',
+        quality: qualId.toUpperCase(),
+      },
+      curPos
+    );
+    setStreamError(null);
+    setIsBuffering(true);
+    setActiveSource(prepared);
+  };
+
   const selectQualityLevel = (levelIndex: number) => {
     setSelectedHlsLevel(levelIndex);
     if (hlsRef.current) {
@@ -1956,8 +2754,21 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   };
 
   const displayTime = seekPreviewTime ?? currentTime;
-  const progressPct = effectiveDuration > 0 ? (displayTime / effectiveDuration) * 100 : 0;
-  const bufferedPct = effectiveDuration > 0 ? (bufferedEnd / effectiveDuration) * 100 : 0;
+  const timelineDuration =
+    effectiveDuration > 0 && effectiveDuration + 0.5 >= displayTime
+      ? effectiveDuration
+      : knownRuntimeSeconds > 0 && knownRuntimeSeconds + 0.5 >= displayTime
+      ? knownRuntimeSeconds
+      : 0;
+  const sliderMax = timelineDuration > 0 ? timelineDuration : Math.max(displayTime, bufferedEnd, 1);
+  const progressPct = sliderMax > 0 ? Math.min(100, (displayTime / sliderMax) * 100) : 0;
+  const bufferedPct = sliderMax > 0 ? Math.min(100, (bufferedEnd / sliderMax) * 100) : 0;
+  const displayEndClock =
+    timelineDuration > 0
+      ? formatClock(timelineDuration)
+      : bufferedEnd > displayTime + 0.5
+      ? formatClock(bufferedEnd)
+      : '--:--';
 
   // Unified available audio languages (embedded HLS tracks, remux multi-audio tracks, and multi-language streams)
   const unifiedLanguageOptions = useMemo(() => {
@@ -2073,25 +2884,21 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
   const handleSelectLanguage = (opt: (typeof unifiedLanguageOptions)[number]) => {
     userLockedLanguageRef.current = true;
-    const curAbsTime =
-      seekOffsetSecondsRef.current + (videoRef.current?.currentTime || 0) ||
-      resumePositionRef.current;
-    if (curAbsTime > 0) {
+    const curAbsTime = getAbsolutePlaybackPosition();
+    if (curAbsTime > 3) {
       resumePositionRef.current = curAbsTime;
     }
 
     if (opt.type === 'hls-track' && typeof opt.trackIndex === 'number') {
       selectAudioTrack(opt.trackIndex);
     } else if (opt.type === 'remux-lang' && opt.targetLang && activeSource) {
-      let nextUrl = activeSource.url.includes('lang=')
+      const nextUrl = activeSource.url.includes('lang=')
         ? activeSource.url.replace(/([?&]lang=)[^&]*/i, `$1${encodeURIComponent(opt.targetLang)}`)
         : `${activeSource.url}&lang=${encodeURIComponent(opt.targetLang)}`;
-      if (nextUrl.includes('/api/stream-proxy') && curAbsTime > 4) {
-        nextUrl = nextUrl.includes('ss=')
-          ? nextUrl.replace(/([?&]ss=)[^&]*/i, `$1${Math.floor(curAbsTime)}`)
-          : `${nextUrl}&ss=${Math.floor(curAbsTime)}`;
-      }
-      const updatedSource: StreamSource = { ...activeSource, url: nextUrl };
+      const updatedSource = prepareSourceWithResume(
+        { ...activeSource, url: nextUrl },
+        curAbsTime
+      );
       setSources((prev) => prev.map((s) => (s.id === activeSource.id ? updatedSource : s)));
       setActiveSource(updatedSource);
     } else if (opt.targetLang) {
@@ -2101,13 +2908,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           (s) => (s.audioLanguage || '').toLowerCase() === opt.targetLang?.toLowerCase()
         );
       if (best && best.id !== activeSource?.id) {
-        let targetSrc = best;
-        if (targetSrc.url.includes('remux=1') && curAbsTime > 4) {
-          const base = targetSrc.url.replace(/[?&]ss=\d+/gi, '').replace(/\?&/, '?');
-          const sep = base.includes('?') ? '&' : '?';
-          targetSrc = { ...targetSrc, url: `${base}${sep}ss=${Math.floor(curAbsTime)}` };
-        }
-        setActiveSource(targetSrc);
+        qualityBaseSourceRef.current = null;
+        pendingQualityFallbackRef.current = null;
+        setSelectedQualityOption('auto');
+        setActiveSource(prepareSourceWithResume(best, curAbsTime));
       }
     }
     setOpenMenu('none');
@@ -2118,10 +2922,6 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
     () => sources.filter((s) => s.format !== 'youtube'),
     [sources]
   );
-  const drawerProviders = useMemo(
-    () => getAvailableProviders(nonTrailerSources),
-    [nonTrailerSources]
-  );
   const drawerLanguages = useMemo(
     () => getAvailableLanguages(nonTrailerSources),
     [nonTrailerSources]
@@ -2129,9 +2929,6 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
   const filteredDrawerSources = useMemo(() => {
     return sources.filter((s) => {
       if (!matchesSourceTypeFilter(s, drawerTypeFilter)) return false;
-      if (drawerProviderFilter !== 'All' && getCanonicalProviderName(s) !== drawerProviderFilter) {
-        return false;
-      }
       if (drawerLanguageFilter !== 'All') {
         const tags = extractLanguageTags(s.audioLanguage);
         if (!tags.includes(drawerLanguageFilter)) return false;
@@ -2139,17 +2936,15 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       if (!matchesQualityFilter(s, drawerQualityFilter)) return false;
       return true;
     });
-  }, [sources, drawerTypeFilter, drawerProviderFilter, drawerLanguageFilter, drawerQualityFilter]);
+  }, [sources, drawerTypeFilter, drawerLanguageFilter, drawerQualityFilter]);
 
   const hasDrawerFilter =
     drawerTypeFilter !== 'all' ||
-    drawerProviderFilter !== 'All' ||
     drawerLanguageFilter !== 'All' ||
     drawerQualityFilter !== 'all';
 
   const resetDrawerFilters = () => {
     setDrawerTypeFilter('all');
-    setDrawerProviderFilter('All');
     setDrawerLanguageFilter('All');
     setDrawerQualityFilter('all');
   };
@@ -2161,6 +2956,12 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
       onPointerMove={handlePointerMove}
       onPointerUp={handlePointerUp}
       onClick={wakeControls}
+      style={
+        {
+          '--player-accent': accent.hex,
+          '--player-accent-glow': `rgba(${accent.glowRgb}, 0.36)`,
+        } as React.CSSProperties
+      }
       className="fixed inset-0 z-50 bg-black select-none flex items-center justify-center overflow-hidden"
     >
       {(activeSource?.format === 'youtube' && !isBengaliSession) || activeSource?.format === 'embed' ? (
@@ -2283,7 +3084,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     External Site Blocks In-App Frame
                   </h3>
                   <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
-                    <span className="font-medium text-white">{activeSource.providerName}</span> sets browser security headers (<code className="text-slate-200">X-Frame-Options</code>) that prevent playback inside an embedded frame. Open it directly in your browser or switch to a direct HLS/MP4 server.
+                    <span className="font-medium text-white">This server</span> sets browser security headers (<code className="text-slate-200">X-Frame-Options</code>) that prevent playback inside an embedded frame. Open it directly in your browser or switch to a direct HLS/MP4 server.
                   </p>
                 </div>
 
@@ -2295,7 +3096,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     className="min-h-[44px] px-5 py-2.5 rounded-xl text-white text-xs sm:text-sm font-semibold shadow-xl inline-flex items-center gap-2 transition-transform active:scale-95"
                     style={{ backgroundColor: accent.hex }}
                   >
-                    <span>Open on {activeSource.providerName}</span>
+                    <span>Open in External Tab</span>
                     <ExternalLink className="h-4 w-4" />
                   </a>
 
@@ -2303,10 +3104,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     <button
                       type="button"
                       onClick={() => {
+                        const curPos = getAbsolutePlaybackPosition();
                         const nextDirect =
                           sources.find((s) => s.id !== activeSource.id && (s.format === 'hls' || s.format === 'mp4')) ||
                           sources.find((s) => s.id !== activeSource.id);
-                        if (nextDirect) setActiveSource(nextDirect);
+                        if (nextDirect) setActiveSource(prepareSourceWithResume(nextDirect, curPos));
                       }}
                       className="min-h-[44px] px-4 py-2.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-white text-xs sm:text-sm font-medium inline-flex items-center gap-2 transition-colors"
                     >
@@ -2361,13 +3163,33 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                 togglePlayPause();
               }
             }}
-            onLoadedData={() => setIsBuffering(false)}
-            onCanPlay={() => setIsBuffering(false)}
-            onCanPlayThrough={() => setIsBuffering(false)}
+            onLoadedData={(e) => {
+              setIsBuffering(false);
+              tryApplyResumeSeek(e.currentTarget);
+            }}
+            onCanPlay={(e) => {
+              setIsBuffering(false);
+              tryApplyResumeSeek(e.currentTarget);
+            }}
+            onCanPlayThrough={(e) => {
+              setIsBuffering(false);
+              tryApplyResumeSeek(e.currentTarget);
+            }}
+            onSeeked={(e) => {
+              const absCur = seekOffsetSecondsRef.current + (e.currentTarget.currentTime || 0);
+              if (
+                pendingResumeTargetRef.current > 3 &&
+                Math.abs(absCur - pendingResumeTargetRef.current) <= 4
+              ) {
+                pendingResumeTargetRef.current = 0;
+                resumeSeekAttemptsRef.current = 0;
+              }
+            }}
             onError={(e) => {
               if (hlsActiveRef.current) return;
               const video = e.currentTarget;
               if (!video.getAttribute('src')) return;
+              if (tryAutoRemuxUpgrade(activeSource)) return;
               handlePlaybackFailure(
                 activeSource,
                 isLive
@@ -2376,22 +3198,98 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
               );
             }}
             onWaiting={() => setIsBuffering(true)}
-            onPlaying={() => {
+            onPlaying={(e) => {
+              const video = e.currentTarget;
+              tryApplyResumeSeek(video);
               hasPlayedFramesRef.current = true;
+              pendingQualityFallbackRef.current = null;
+              setHasFirstFrame(true);
               setIsBuffering(false);
               setIsPlaying(true);
               wakeControls();
               if (isLive && session.liveChannel) {
                 markChannelHealth(session.liveChannel.id, true);
               }
+              const absCur = seekOffsetSecondsRef.current + (video.currentTime || 0);
+              if (
+                !isLive &&
+                initialResumeToastTargetRef.current > 5 &&
+                !resumedToastShownRef.current &&
+                (absCur > 5 || seekOffsetSecondsRef.current > 5)
+              ) {
+                resumedToastShownRef.current = true;
+                const noticeSec = Math.floor(initialResumeToastTargetRef.current);
+                setResumedNoticeTime(noticeSec);
+                window.setTimeout(() => {
+                  setResumedNoticeTime((cur) => (cur === noticeSec ? null : cur));
+                }, 6000);
+              }
             }}
-            onPause={() => setIsPlaying(false)}
+            onPause={(e) => {
+              setIsPlaying(false);
+              const cur = getAbsolutePlaybackPosition();
+              const dur = effectiveDuration > 0 ? effectiveDuration : e.currentTarget.duration;
+              if (cur >= 3) {
+                resumePositionRef.current = cur;
+                persistProgress(cur, dur);
+              }
+            }}
+            onEnded={(e) => {
+              if (isLive) return;
+              const video = e.currentTarget;
+              const cur = Math.max(
+                seekOffsetSecondsRef.current + (video.currentTime || 0),
+                resumePositionRef.current
+              );
+              const dur = effectiveDuration > 0 ? effectiveDuration : knownRuntimeRef.current;
+              if (dur > 120 && cur > 5 && cur < dur - 25) {
+                // Stream connection dropped mid-video; auto-recover from exact stopped timestamp
+                resumePositionRef.current = cur;
+                persistProgress(cur, dur);
+                if (activeSource && prematureReconnectCountRef.current < 3) {
+                  prematureReconnectCountRef.current += 1;
+                  setIsBuffering(true);
+                  if (isServerRemuxUrl(activeSource.url)) {
+                    setActiveSource(prepareSourceWithResume(activeSource, cur));
+                  } else {
+                    pendingResumeTargetRef.current = cur;
+                    resumeSeekAttemptsRef.current = 0;
+                    setReloadTick((t) => t + 1);
+                  }
+                  return;
+                }
+                if (activeSource) {
+                  handlePlaybackFailure(activeSource, 'Stream disconnected mid-playback.');
+                  return;
+                }
+              }
+              setIsPlaying(false);
+            }}
             onTimeUpdate={() => {
               const video = videoRef.current;
               if (!video) return;
               const rawTime = video.currentTime || 0;
               const computedCurrent = seekOffsetSecondsRef.current + rawTime;
-              resumePositionRef.current = computedCurrent;
+
+              // Protect saved resume timestamp against initial 0:00 timeupdate events before seek completes
+              if (
+                !isLive &&
+                pendingResumeTargetRef.current > 3 &&
+                seekOffsetSecondsRef.current === 0
+              ) {
+                if (Math.abs(rawTime - pendingResumeTargetRef.current) <= 4) {
+                  pendingResumeTargetRef.current = 0;
+                  resumeSeekAttemptsRef.current = 0;
+                  resumePositionRef.current = computedCurrent;
+                } else if (rawTime < 3) {
+                  tryApplyResumeSeek(video);
+                  return;
+                } else {
+                  resumePositionRef.current = computedCurrent;
+                }
+              } else {
+                resumePositionRef.current = computedCurrent;
+              }
 
               if (activeSubtitleId !== 'off' && seekOffsetSecondsRef.current > 0) {
                 const tracks = Array.from(video.textTracks);
@@ -2413,15 +3311,28 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     seekOffsetSecondsRef.current + video.buffered.end(video.buffered.length - 1)
                   );
                 }
+                // Pick up late-growing stream duration or seekable range when durationchange does not fire
+                const finiteVideoDur =
+                  Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+                const seekableEnd =
+                  video.seekable && video.seekable.length > 0
+                    ? video.seekable.end(video.seekable.length - 1)
+                    : 0;
+                const bestRawDur = Math.max(
+                  finiteVideoDur,
+                  Number.isFinite(seekableEnd) && seekableEnd > 0 ? seekableEnd : 0
+                );
+                if (bestRawDur > 0) {
+                  applyReportedDuration(bestRawDur);
+                }
               }
             }}
             onDurationChange={() => {
               const video = videoRef.current;
               if (video && Number.isFinite(video.duration) && video.duration > 0) {
-                if (!activeSource?.url.includes('remux=1') || duration === 0) {
-                  setDuration(video.duration);
-                }
+                applyReportedDuration(video.duration);
               }
+              tryApplyResumeSeek(video);
             }}
           >
         {subtitles.map((sub, idx) => {
@@ -2449,21 +3360,46 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         </div>
       )}
 
-      {/* P2P Sequential Pre-Buffering 60fps HUD */}
-      {isActiveP2PTorrent && p2pAttachUrl !== activeSource?.url && !streamError && activeSource && (
-        <P2PPrebufferHUD
-          status={p2pStatus}
-          activeSource={activeSource}
-          accentHex={accent.hex}
-          onCancel={handleClose}
-          onSwitchServer={sources.length > 1 ? () => setOpenMenu('sources') : undefined}
-          onContinueAnyway={() => {
-            p2pBypassForSourceRef.current = activeSource.id;
-            setP2pBypassTick((t) => t + 1);
-          }}
-          hasAlternativeSources={sources.length > 1}
-        />
-      )}
+      {/* Initial Cinema Pre-Buffering HUD (P2P Swarm VOD and Resolving states only — Live TV bypasses pre-buffering entirely) */}
+      {!hasFirstFrame &&
+        !streamError &&
+        !isLive &&
+        openMenu === 'none' &&
+        ((isActiveP2PTorrent && p2pAttachUrl !== activeSource?.url) ||
+          isBuffering ||
+          (isResolvingStreams && !activeSource)) && (
+          <CinemaPrebufferHUD
+            mode={
+              isActiveP2PTorrent && p2pAttachUrl !== activeSource?.url
+                ? 'p2p'
+                : !activeSource && isResolvingStreams
+                ? 'resolving'
+                : 'direct'
+            }
+            session={session}
+            status={p2pStatus}
+            activeSource={activeSource}
+            accentHex={accent.hex}
+            onCancel={handleClose}
+            onSwitchServer={
+              sources.length > 1
+                ? () => {
+                    wakeControls();
+                    setOpenMenu('sources');
+                  }
+                : undefined
+            }
+            onContinueAnyway={
+              isActiveP2PTorrent && activeSource
+                ? () => {
+                    p2pBypassForSourceRef.current = activeSource.id;
+                    setP2pBypassTick((t) => t + 1);
+                  }
+                : undefined
+            }
+            hasAlternativeSources={sources.length > 1}
+          />
+        )}
 
       {/* Tap-to-Unmute prompt if browser/WebView enforced muted autoplay */}
       {showUnmutePrompt && isMuted && !streamError && (
@@ -2489,23 +3425,76 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
       {/* Live Backup Feed Auto-Failover Toast */}
       {liveSwitchToast && !streamError && (
-        <div className="pointer-events-none absolute top-16 left-1/2 -translate-x-1/2 z-30 px-4 py-1.5 rounded-full bg-black/80 border border-white/20 text-xs font-semibold text-amber-300 shadow-xl">
+        <div className="pointer-events-none absolute top-16 left-1/2 -translate-x-1/2 z-30 px-4 py-1.5 rounded-full liquid-glass-strong text-xs font-semibold text-amber-300 shadow-xl">
           {liveSwitchToast}
         </div>
       )}
 
-      {/* Buffering Spinner */}
-      {isBuffering && !streamError && (!isActiveP2PTorrent || p2pAttachUrl === activeSource?.url) && (
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-20">
-          <div className="h-14 w-14 rounded-full liquid-glass-strong flex items-center justify-center">
-            <Loader2 className="h-7 w-7 animate-spin" style={{ color: accent.hex }} />
-          </div>
+      {/* Resumed Playback Position Toast */}
+      {resumedNoticeTime !== null && !streamError && !isLive && (
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="player-interactive absolute top-20 left-1/2 -translate-x-1/2 z-30 flex items-center gap-3 px-4 py-2 rounded-2xl liquid-glass-strong shadow-2xl max-w-[92vw]"
+        >
+          <span className="text-xs font-medium text-slate-200 whitespace-nowrap">
+            Resumed from{' '}
+            <span className="font-mono-tabular font-bold text-white">
+              {formatClock(resumedNoticeTime)}
+            </span>
+          </span>
+          <button
+            type="button"
+            onClick={() => seekToSeconds(0)}
+            className="px-2.5 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-[11px] font-semibold text-white transition-colors whitespace-nowrap"
+          >
+            Start Over
+          </button>
+          <button
+            type="button"
+            onClick={() => setResumedNoticeTime(null)}
+            aria-label="Dismiss resume notice"
+            className="p-1 rounded-lg text-slate-400 hover:text-white transition-colors"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
         </div>
       )}
 
+      {/* Tactile Seek Feedback Toast (-10s / +10s) */}
+      {seekFeedback && !streamError && (
+        <div
+          key={seekFeedback.key}
+          className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-24 z-30 px-4 py-2 rounded-2xl liquid-glass-strong flex items-center gap-2 text-xs font-mono-tabular font-bold text-white shadow-2xl"
+        >
+          {seekFeedback.dir === 'back' ? (
+            <>
+              <RotateCcw className="h-4 w-4 text-white" />
+              <span>-{seekFeedback.amount}s</span>
+            </>
+          ) : (
+            <>
+              <span>+{seekFeedback.amount}s</span>
+              <RotateCw className="h-4 w-4 text-white" />
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Compact Mid-Playback Rebuffering Indicator */}
+      {hasFirstFrame &&
+        isBuffering &&
+        !streamError &&
+        (!isActiveP2PTorrent || p2pAttachUrl === activeSource?.url) && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center z-20">
+            <div className="h-16 w-16 rounded-full liquid-glass-strong flex items-center justify-center shadow-2xl">
+              <Loader2 className="h-7 w-7 animate-spin" style={{ color: accent.hex }} />
+            </div>
+          </div>
+        )}
+
       {/* Swipe Gesture HUD (Brightness / Volume) */}
       {gestureHud && (
-        <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 px-5 py-3.5 rounded-2xl liquid-glass-strong flex items-center gap-3">
+        <div className="pointer-events-none absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-30 px-5 py-3.5 rounded-2xl liquid-glass-strong flex items-center gap-3 shadow-2xl">
           {gestureHud.type === 'brightness' ? (
             <Sun className="h-5 w-5 text-amber-400" />
           ) : (
@@ -2525,17 +3514,29 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
 
       {/* Stream Error Overlay with recovery, Next Channel, Copy URL, and Exit */}
       {streamError && (
-        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/65 backdrop-blur-xl p-6">
-          <div className="max-w-md w-full rounded-2xl liquid-glass-strong p-6 text-center space-y-4">
-            <p className="text-base font-semibold text-white">Stream Unavailable</p>
-            <p className="text-xs sm:text-sm text-slate-200 leading-relaxed">
-              {streamError}
-            </p>
-            <div className="flex flex-wrap items-center justify-center gap-2.5">
+        <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/75 backdrop-blur-xl p-5">
+          <div
+            className="max-w-md w-full rounded-3xl liquid-glass-strong p-6 text-center space-y-4 shadow-[0_24px_80px_rgba(0,0,0,0.85)]"
+            style={{
+              background:
+                'linear-gradient(180deg, rgba(22, 26, 38, 0.9) 0%, rgba(10, 13, 22, 0.95) 100%)',
+            }}
+          >
+            <div className="mx-auto h-12 w-12 rounded-2xl bg-white/[0.08] border border-white/15 flex items-center justify-center">
+              <Server className="h-5 w-5 text-slate-200" />
+            </div>
+            <div className="space-y-1.5">
+              <p className="font-display text-lg font-bold text-white">Stream Unavailable</p>
+              <p className="text-xs sm:text-sm text-slate-300 leading-relaxed">
+                {streamError}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center justify-center gap-2.5 pt-1">
               <button
                 type="button"
                 onClick={() => {
                   p2pBypassForSourceRef.current = null;
+                  const curPos = getAbsolutePlaybackPosition();
                   const wantedLang = activeSource?.audioLanguage;
                   const nextAlt =
                     (wantedLang ? selectMostCompatibleSource(sources, failedSourceIdsRef.current, wantedLang, true) : null) ||
@@ -2544,13 +3545,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     sources.find((s) => s.id !== activeSource?.id);
                   if (nextAlt) {
                     setStreamError(null);
-                    setActiveSource(nextAlt);
+                    setActiveSource(prepareSourceWithResume(nextAlt, curPos));
                   } else {
                     setStreamError(null);
+                    if (curPos > 3 && activeSource && !isServerRemuxUrl(activeSource.url)) {
+                      pendingResumeTargetRef.current = curPos;
+                    }
                     setReloadTick((t) => t + 1);
                   }
                 }}
-                className="min-h-[40px] px-4 py-2 rounded-xl text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-lg transition-transform active:scale-95"
+                className="min-h-[42px] px-4 py-2 rounded-xl text-white text-xs font-semibold inline-flex items-center gap-1.5 shadow-lg transition-transform active:scale-95"
                 style={{ backgroundColor: accent.hex }}
               >
                 <Play className="h-3.5 w-3.5 fill-current" />
@@ -2638,32 +3642,53 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         </div>
       )}
 
-      {/* Custom Player Controls Overlay */}
+      {/* Custom Cinema Player Controls Overlay */}
       <div
         className={`absolute inset-0 z-20 flex flex-col justify-between transition-opacity duration-200 ${
-          showControls ? 'opacity-100' : 'opacity-0 pointer-events-none'
+          showControls ? 'opacity-100 bg-black/25' : 'opacity-0 pointer-events-none'
         }`}
       >
-        {/* Top Gradient & Title Bar */}
-        <div className="bg-gradient-to-b from-black/85 via-black/45 to-transparent px-4 sm:px-6 pt-4 pb-10 flex items-center justify-between gap-4">
+        {/* Top Ambient Scrim & Sleek Header Bar */}
+        <div className="bg-gradient-to-b from-black/90 via-black/45 to-transparent px-4 sm:px-7 pt-4 pb-10 flex items-center justify-between gap-3">
           {!isLocked ? (
             <div className="flex items-center gap-3 min-w-0">
               <button
                 type="button"
                 onClick={handleClose}
                 aria-label="Close player"
-                className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-white/10 backdrop-blur-xl hover:bg-white/20 border border-white/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.3)] text-white transition-colors shrink-0"
+                className="h-11 w-11 flex items-center justify-center rounded-2xl liquid-glass-strong hover:bg-white/20 text-white transition-all active:scale-95 shrink-0"
               >
                 <ArrowLeft className="h-5 w-5" />
               </button>
               <div className="min-w-0">
-                <h2 className="font-display text-base sm:text-lg font-semibold text-white truncate">
+                <h2 className="font-display text-base sm:text-xl font-bold tracking-tight text-white truncate">
                   {session.title}
                 </h2>
-                <p className="text-xs text-slate-300 truncate">
-                  {activeSource
-                    ? `Via ${activeSource.providerName} · ${activeSource.quality}${activeSource.seeders !== undefined ? ` · ${activeSource.seeders} seeders` : ''}`
-                    : session.subtitle || ''}
+                <p className="text-xs text-slate-300 truncate font-medium">
+                  {(() => {
+                    const parts: string[] = [];
+                    if (session.mediaType === 'tv' && session.seasonNumber && session.episodeNumber) {
+                      parts.push(
+                        `S${session.seasonNumber} · E${session.episodeNumber}${
+                          session.episodeTitle ? ` · ${session.episodeTitle}` : ''
+                        }`
+                      );
+                    }
+                    if (activeSource?.audioLanguage) {
+                      parts.push(`${activeSource.audioLanguage} Audio`);
+                    }
+                    const qDisplay =
+                      selectedHlsLevel !== -1
+                        ? hlsLevels.find((l) => l.index === selectedHlsLevel)?.label
+                        : selectedQualityOption !== 'auto'
+                        ? selectedQualityOption.toUpperCase()
+                        : activeSource?.quality;
+                    if (qDisplay) parts.push(qDisplay);
+                    if (activeSource?.seeders !== undefined) {
+                      parts.push(`${activeSource.seeders} seeders`);
+                    }
+                    return parts.length > 0 ? parts.join(' · ') : session.subtitle || 'Cinema Stream';
+                  })()}
                 </p>
               </div>
             </div>
@@ -2678,7 +3703,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                   type="button"
                   onClick={() => setVideoFit((prev) => (prev === 'contain' ? 'cover' : 'contain'))}
                   aria-label="Toggle video fit"
-                  className="min-h-[40px] px-3 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 text-xs font-medium text-white inline-flex items-center gap-1.5"
+                  className="h-10 px-3 rounded-xl liquid-glass-strong hover:bg-white/20 text-xs font-medium text-white inline-flex items-center gap-1.5 transition-all active:scale-95"
                 >
                   <Maximize2 className="h-4 w-4" />
                   <span className="hidden sm:inline">{videoFit === 'cover' ? 'Fill' : 'Fit'}</span>
@@ -2688,10 +3713,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     type="button"
                     onClick={() => setOpenMenu(openMenu === 'sources' ? 'none' : 'sources')}
                     aria-label="Open stream sources"
-                    className={`min-h-[40px] px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors ${
+                    className={`h-10 px-3 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-all active:scale-95 ${
                       openMenu === 'sources'
-                        ? 'text-white border-transparent shadow-md'
-                        : 'bg-white/10 hover:bg-white/20 border-white/20 text-white'
+                        ? 'text-white shadow-lg'
+                        : 'liquid-glass-strong hover:bg-white/20 text-white'
                     }`}
                     style={openMenu === 'sources' ? { backgroundColor: accent.hex } : undefined}
                   >
@@ -2718,10 +3743,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                 setOpenMenu('none');
               }}
               aria-label={isLocked ? 'Unlock controls' : 'Lock controls'}
-              className={`min-h-[40px] px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 transition-colors ${
+              className={`h-10 px-3 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 transition-all active:scale-95 ${
                 isLocked
-                  ? 'text-white border-transparent shadow-lg'
-                  : 'bg-white/10 hover:bg-white/20 border-white/20 text-white'
+                  ? 'text-white shadow-lg'
+                  : 'liquid-glass-strong hover:bg-white/20 text-white'
               }`}
               style={isLocked ? { backgroundColor: accent.hex } : undefined}
             >
@@ -2731,28 +3756,28 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           </div>
         </div>
 
-        {/* Center Transport Controls */}
+        {/* Center Hero Transport Controls */}
         {!isLocked && (
-          <div className="flex items-center justify-center gap-6 sm:gap-10">
+          <div className="flex items-center justify-center gap-7 sm:gap-12 px-4">
             {isLive ? (
               <button
                 type="button"
                 onClick={() => switchLiveChannel(-1)}
                 aria-label="Previous live channel"
-                className="min-h-[54px] min-w-[54px] flex flex-col items-center justify-center rounded-full bg-white/10 backdrop-blur-2xl hover:bg-white/20 border border-white/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.3)] text-white transition-all active:scale-95"
+                className="h-14 w-14 sm:h-16 sm:w-16 flex flex-col items-center justify-center rounded-full liquid-glass-strong hover:bg-white/20 text-white shadow-[0_12px_32px_rgba(0,0,0,0.55)] transition-all active:scale-90"
               >
                 <SkipBack className="h-5 w-5" />
-                <span className="text-[10px] font-mono-tabular mt-0.5">Prev</span>
+                <span className="text-[10px] font-mono-tabular font-semibold mt-0.5">Prev</span>
               </button>
             ) : (
               <button
                 type="button"
                 onClick={() => seekBy(-10)}
                 aria-label="Rewind 10 seconds"
-                className="min-h-[54px] min-w-[54px] flex flex-col items-center justify-center rounded-full bg-white/10 backdrop-blur-2xl hover:bg-white/20 border border-white/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.3)] text-white transition-all active:scale-95"
+                className="h-14 w-14 sm:h-16 sm:w-16 flex flex-col items-center justify-center rounded-full liquid-glass-strong hover:bg-white/20 text-white shadow-[0_12px_32px_rgba(0,0,0,0.55)] transition-all active:scale-90"
               >
                 <RotateCcw className="h-5 w-5" />
-                <span className="text-[10px] font-mono-tabular mt-0.5">10s</span>
+                <span className="text-[10px] font-mono-tabular font-semibold mt-0.5">10s</span>
               </button>
             )}
 
@@ -2760,16 +3785,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
               type="button"
               onClick={togglePlayPause}
               aria-label={isPlaying ? 'Pause' : 'Play'}
-              className="h-16 w-16 sm:h-20 sm:w-20 flex items-center justify-center rounded-full backdrop-blur-2xl border border-white/30 text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.45)] transition-transform active:scale-95"
+              className="h-[74px] w-[74px] sm:h-[84px] sm:w-[84px] flex items-center justify-center rounded-full border-2 border-white/30 text-white transition-all hover:scale-105 active:scale-92"
               style={{
-                backgroundColor: accent.hex,
-                boxShadow: `0 12px 36px rgba(${accent.glowRgb},0.45)`,
+                background: `radial-gradient(circle at 32% 28%, rgba(255,255,255,0.22) 0%, ${accent.hex} 62%, ${accent.hex} 100%)`,
+                boxShadow: `0 0 42px rgba(${accent.glowRgb}, 0.55), inset 0 1px 1px rgba(255,255,255,0.45)`,
               }}
             >
               {isPlaying ? (
-                <Pause className="h-7 w-7 sm:h-8 sm:w-8 fill-current" />
+                <Pause className="h-8 w-8 sm:h-9 sm:w-9 fill-current" />
               ) : (
-                <Play className="h-7 w-7 sm:h-8 sm:w-8 fill-current ml-1" />
+                <Play className="h-8 w-8 sm:h-9 sm:w-9 fill-current ml-1" />
               )}
             </button>
 
@@ -2778,55 +3803,66 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                 type="button"
                 onClick={() => switchLiveChannel(1)}
                 aria-label="Next live channel"
-                className="min-h-[54px] min-w-[54px] flex flex-col items-center justify-center rounded-full bg-white/10 backdrop-blur-2xl hover:bg-white/20 border border-white/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.3)] text-white transition-all active:scale-95"
+                className="h-14 w-14 sm:h-16 sm:w-16 flex flex-col items-center justify-center rounded-full liquid-glass-strong hover:bg-white/20 text-white shadow-[0_12px_32px_rgba(0,0,0,0.55)] transition-all active:scale-90"
               >
                 <SkipForward className="h-5 w-5" />
-                <span className="text-[10px] font-mono-tabular mt-0.5">Next</span>
+                <span className="text-[10px] font-mono-tabular font-semibold mt-0.5">Next</span>
               </button>
             ) : (
               <button
                 type="button"
                 onClick={() => seekBy(10)}
                 aria-label="Forward 10 seconds"
-                className="min-h-[54px] min-w-[54px] flex flex-col items-center justify-center rounded-full bg-white/10 backdrop-blur-2xl hover:bg-white/20 border border-white/25 shadow-[inset_0_1px_0_rgba(255,255,255,0.3)] text-white transition-all active:scale-95"
+                className="h-14 w-14 sm:h-16 sm:w-16 flex flex-col items-center justify-center rounded-full liquid-glass-strong hover:bg-white/20 text-white shadow-[0_12px_32px_rgba(0,0,0,0.55)] transition-all active:scale-90"
               >
                 <RotateCw className="h-5 w-5" />
-                <span className="text-[10px] font-mono-tabular mt-0.5">10s</span>
+                <span className="text-[10px] font-mono-tabular font-semibold mt-0.5">10s</span>
               </button>
             )}
           </div>
         )}
 
-        {/* Bottom Scrubber & Action Bar */}
+        {/* Bottom Scrubber & Sleek Single-Row Action Dock */}
         {!isLocked ? (
-          <div className="bg-gradient-to-t from-black/90 via-black/60 to-transparent px-4 sm:px-6 pt-10 pb-5 space-y-3">
-            {/* Seek Bar */}
+          <div className="bg-gradient-to-t from-black/95 via-black/70 to-transparent px-4 sm:px-7 pt-12 pb-5 space-y-3">
+            {/* Seek Bar with Floating Scrub Tooltip */}
             {!isLive ? (
               <div className="flex items-center gap-3">
-                <span className="text-xs font-mono-tabular text-slate-200 w-14 text-right">
+                <span className="text-xs font-mono-tabular font-semibold text-white w-14 text-right shrink-0">
                   {formatClock(displayTime)}
                 </span>
 
-                <div className="relative flex-1 flex items-center h-6">
-                  <div className="absolute inset-x-0 h-1 rounded-full bg-white/20 overflow-hidden pointer-events-none">
+                <div className="group relative flex-1 flex items-center h-7">
+                  {seekPreviewTime !== null && (
                     <div
-                      className="h-full bg-white/35"
+                      className="pointer-events-none absolute -top-9 -translate-x-1/2 px-2.5 py-1 rounded-lg liquid-glass-strong text-[11px] font-mono-tabular font-bold text-white shadow-xl whitespace-nowrap"
+                      style={{
+                        left: `${Math.min(92, Math.max(8, progressPct))}%`,
+                      }}
+                    >
+                      {formatClock(seekPreviewTime)}
+                    </div>
+                  )}
+                  <div className="absolute inset-x-0 h-1.5 rounded-full bg-white/15 overflow-hidden pointer-events-none">
+                    <div
+                      className="h-full bg-white/30 transition-[width] duration-150"
                       style={{ width: `${Math.min(100, bufferedPct)}%` }}
                     />
                   </div>
                   <div
-                    className="absolute left-0 h-1 rounded-full pointer-events-none"
+                    className="absolute left-0 h-1.5 rounded-full pointer-events-none"
                     style={{
                       backgroundColor: accent.hex,
                       width: `${Math.min(100, progressPct)}%`,
+                      boxShadow: `0 0 12px rgba(${accent.glowRgb}, 0.7)`,
                     }}
                   />
                   <input
                     type="range"
                     min={0}
-                    max={effectiveDuration || 100}
+                    max={sliderMax}
                     step={0.5}
-                    value={displayTime}
+                    value={Math.min(displayTime, sliderMax)}
                     aria-label="Seek timeline"
                     onChange={(e) => {
                       const next = Number(e.target.value);
@@ -2858,9 +3894,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                   />
                 </div>
 
-                <span className="text-xs font-mono-tabular text-slate-400 w-14">
-                  {formatClock(effectiveDuration)}
-                </span>
+                <button
+                  type="button"
+                  onClick={() => setShowRemainingTime((prev) => !prev)}
+                  title="Toggle remaining / total duration"
+                  className="text-xs font-mono-tabular text-slate-300 hover:text-white w-14 text-left shrink-0 transition-colors"
+                >
+                  {showRemainingTime && timelineDuration > displayTime
+                    ? `-${formatClock(timelineDuration - displayTime)}`
+                    : displayEndClock}
+                </button>
               </div>
             ) : (
               <div className="flex items-center gap-2 text-xs font-semibold text-white">
@@ -2872,19 +3915,19 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
               </div>
             )}
 
-            {/* Control Actions Row */}
+            {/* Unified Single-Row Control Actions Dock */}
             <div className="flex items-center justify-between gap-2 relative">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 shrink-0">
                 <button
                   type="button"
                   onClick={toggleMute}
                   aria-label={isMuted ? 'Unmute' : 'Mute'}
-                  className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-lg hover:bg-white/10 text-slate-200"
+                  className="h-10 w-10 flex items-center justify-center rounded-xl bg-white/[0.08] hover:bg-white/[0.16] border border-white/[0.12] backdrop-blur-xl text-white transition-all active:scale-95"
                 >
                   {isMuted || volume === 0 ? (
-                    <VolumeX className="h-5 w-5" />
+                    <VolumeX className="h-4.5 w-4.5" />
                   ) : (
-                    <Volume2 className="h-5 w-5" />
+                    <Volume2 className="h-4.5 w-4.5" />
                   )}
                 </button>
 
@@ -2904,19 +3947,24 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                       videoRef.current.muted = val === 0;
                     }
                   }}
-                  className="hidden sm:block w-24 cursor-pointer"
+                  className="hidden md:block w-24 cursor-pointer"
                   style={{ accentColor: accent.hex }}
                 />
               </div>
 
-              <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap justify-end">
+              <div className="flex items-center gap-1.5 sm:gap-2 overflow-x-auto no-scrollbar max-w-full py-0.5">
                 {!isLive && (
                   <button
                     type="button"
                     onClick={() =>
                       setOpenMenu(openMenu === 'speed' ? 'none' : 'speed')
                     }
-                    className="min-h-[40px] px-3 rounded-lg bg-white/10 hover:bg-white/15 text-xs font-mono-tabular text-white inline-flex items-center gap-1.5"
+                    className={`h-10 px-3 rounded-xl border text-xs font-mono-tabular font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 backdrop-blur-xl transition-all active:scale-95 ${
+                      openMenu === 'speed'
+                        ? 'text-white border-transparent shadow-lg'
+                        : 'bg-white/[0.08] hover:bg-white/[0.16] border-white/[0.12] text-white'
+                    }`}
+                    style={openMenu === 'speed' ? { backgroundColor: accent.hex } : undefined}
                   >
                     <Gauge className="h-4 w-4" />
                     <span>{playbackRate}x</span>
@@ -2929,15 +3977,15 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     onClick={() =>
                       setOpenMenu(openMenu === 'language' ? 'none' : 'language')
                     }
-                    className={`min-h-[40px] px-3 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 ${
+                    className={`h-10 px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 backdrop-blur-xl transition-all active:scale-95 ${
                       openMenu === 'language'
-                        ? 'text-white shadow-md'
-                        : 'bg-white/10 hover:bg-white/15 text-white'
+                        ? 'text-white border-transparent shadow-lg'
+                        : 'bg-white/[0.08] hover:bg-white/[0.16] border-white/[0.12] text-white'
                     }`}
                     style={openMenu === 'language' ? { backgroundColor: accent.hex } : undefined}
                   >
                     <Languages className="h-4 w-4" />
-                    <span className="max-w-[90px] truncate">{currentLanguageDisplay}</span>
+                    <span className="max-w-[84px] truncate">{currentLanguageDisplay}</span>
                   </button>
                 )}
 
@@ -2947,10 +3995,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     onClick={() =>
                       setOpenMenu(openMenu === 'subtitles' ? 'none' : 'subtitles')
                     }
-                    className={`min-h-[40px] px-3 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 ${
+                    className={`h-10 px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 backdrop-blur-xl transition-all active:scale-95 ${
                       activeSubtitleId !== 'off'
-                        ? 'bg-[#3B82F6] text-white'
-                        : 'bg-white/10 hover:bg-white/15 text-white'
+                        ? 'bg-[#3B82F6] border-transparent text-white shadow-lg'
+                        : 'bg-white/[0.08] hover:bg-white/[0.16] border-white/[0.12] text-white'
                     }`}
                   >
                     <Captions className="h-4 w-4" />
@@ -2964,10 +4012,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                     onClick={() =>
                       setOpenMenu(openMenu === 'sources' ? 'none' : 'sources')
                     }
-                    className={`min-h-[40px] px-3 rounded-lg text-xs font-medium inline-flex items-center gap-1.5 ${
+                    className={`h-10 px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 backdrop-blur-xl transition-all active:scale-95 ${
                       openMenu === 'sources'
-                        ? 'text-white shadow-md'
-                        : 'bg-white/10 hover:bg-white/15 text-white'
+                        ? 'text-white border-transparent shadow-lg'
+                        : 'bg-white/[0.08] hover:bg-white/[0.16] border-white/[0.12] text-white'
                     }`}
                     style={openMenu === 'sources' ? { backgroundColor: accent.hex } : undefined}
                   >
@@ -2990,14 +4038,20 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                   onClick={() =>
                     setOpenMenu(openMenu === 'quality' ? 'none' : 'quality')
                   }
-                  className="min-h-[40px] px-3 rounded-lg bg-white/10 hover:bg-white/15 text-xs font-medium text-white inline-flex items-center gap-1.5"
+                  className={`h-10 px-3 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 backdrop-blur-xl transition-all active:scale-95 ${
+                    openMenu === 'quality'
+                      ? 'text-white border-transparent shadow-lg'
+                      : 'bg-white/[0.08] hover:bg-white/[0.16] border-white/[0.12] text-white'
+                  }`}
+                  style={openMenu === 'quality' ? { backgroundColor: accent.hex } : undefined}
                 >
                   <SlidersHorizontal className="h-4 w-4" />
                   <span>
-                    {selectedHlsLevel === -1
-                      ? activeSource?.quality || 'Auto'
-                      : hlsLevels.find((l) => l.index === selectedHlsLevel)?.label ||
-                        'Quality'}
+                    {selectedHlsLevel !== -1
+                      ? hlsLevels.find((l) => l.index === selectedHlsLevel)?.label || 'Quality'
+                      : selectedQualityOption !== 'auto'
+                      ? selectedQualityOption.toUpperCase()
+                      : activeSource?.quality || 'Auto'}
                   </span>
                 </button>
 
@@ -3016,7 +4070,9 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                               session.seasonNumber &&
                               session.episodeNumber
                                 ? `S${session.seasonNumber} E${session.episodeNumber}`
-                                : activeSource.providerName,
+                                : activeSource.audioLanguage
+                                ? `${activeSource.audioLanguage} Audio`
+                                : activeSource.quality || 'Direct Stream',
                             isLive,
                             bufferMb: storageService.getPlayerBufferMb(),
                             fallbackUrls: isLive
@@ -3035,7 +4091,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                         }}
                         aria-label="Open in Native Android ExoPlayer"
                         title="Open in Native Android ExoPlayer"
-                        className="min-h-[40px] px-2.5 rounded-lg bg-[#E50914]/85 hover:bg-[#E50914] text-xs font-semibold text-white inline-flex items-center gap-1.5"
+                        className="h-10 px-2.5 rounded-xl bg-[#E50914]/85 hover:bg-[#E50914] text-xs font-semibold text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-all active:scale-95"
                       >
                         <Smartphone className="h-4 w-4" />
                         <span className="hidden sm:inline">ExoPlayer</span>
@@ -3053,7 +4109,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                           }
                           aria-label="Download with Android DownloadManager"
                           title="Download with Android DownloadManager"
-                          className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/15 text-white"
+                          className="h-10 w-10 flex items-center justify-center rounded-xl bg-white/[0.08] hover:bg-white/[0.16] border border-white/[0.12] text-white shrink-0 transition-all active:scale-95"
                         >
                           <Download className="h-4 w-4" />
                         </button>
@@ -3064,7 +4120,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                         onClick={() => void nativeAndroidBridge.enterPictureInPicture()}
                         aria-label="Picture in Picture"
                         title="Picture in Picture"
-                        className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/15 text-white"
+                        className="h-10 w-10 flex items-center justify-center rounded-xl bg-white/[0.08] hover:bg-white/[0.16] border border-white/[0.12] text-white shrink-0 transition-all active:scale-95"
                       >
                         <PictureInPicture2 className="h-4 w-4" />
                       </button>
@@ -3075,7 +4131,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                   type="button"
                   onClick={() => void toggleFullscreen()}
                   aria-label={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
-                  className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-lg bg-white/10 hover:bg-white/15 text-white"
+                  className="h-10 w-10 flex items-center justify-center rounded-xl bg-white/[0.08] hover:bg-white/[0.16] border border-white/[0.12] text-white shrink-0 backdrop-blur-xl transition-all active:scale-95"
                 >
                   {isFullscreen ? (
                     <Minimize className="h-4 w-4" />
@@ -3085,10 +4141,10 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                 </button>
               </div>
 
-              {/* Popover Menus */}
+              {/* Bounded Frosted Popover Menus */}
               {openMenu === 'language' && (
-                <div className="player-interactive absolute right-0 bottom-12 w-72 rounded-2xl liquid-glass-strong p-2 space-y-1 shadow-2xl z-40 max-h-80 overflow-y-auto touch-auto">
-                  <p className="px-3 py-1.5 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
+                <div className="player-interactive absolute right-0 bottom-12 w-72 max-w-[calc(100vw-2rem)] rounded-2xl liquid-glass-strong p-2 space-y-1 shadow-2xl z-40 max-h-80 overflow-y-auto touch-auto">
+                  <p className="px-3 py-1.5 text-xs font-semibold text-slate-300 border-b border-white/10">
                     Audio Language
                   </p>
                   {unifiedLanguageOptions.map((opt) => (
@@ -3111,13 +4167,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
               )}
 
               {openMenu === 'speed' && (
-                <div className="player-interactive absolute right-0 bottom-12 w-40 rounded-2xl liquid-glass-strong p-1.5 touch-auto">
+                <div className="player-interactive absolute right-0 bottom-12 w-44 max-w-[calc(100vw-2rem)] rounded-2xl liquid-glass-strong p-2 space-y-1 shadow-2xl z-40 touch-auto">
+                  <p className="px-3 py-1.5 text-xs font-semibold text-slate-300 border-b border-white/10">
+                    Playback Speed
+                  </p>
                   {SPEED_OPTIONS.map((rate) => (
                     <button
                       key={rate}
                       type="button"
                       onClick={() => changeSpeed(rate)}
-                      className={`w-full text-left px-3 py-2 rounded-lg text-xs font-mono-tabular transition-colors ${
+                      className={`w-full text-left px-3 py-2 rounded-xl text-xs font-mono-tabular flex items-center justify-between transition-colors ${
                         playbackRate === rate
                           ? 'text-white font-semibold shadow-md'
                           : 'text-slate-200 hover:bg-white/10'
@@ -3128,21 +4187,27 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                           : undefined
                       }
                     >
-                      {rate}x {rate === 1 ? '(Normal)' : ''}
+                      <span>
+                        {rate}x {rate === 1 ? '(Normal)' : ''}
+                      </span>
+                      {playbackRate === rate && <Check className="h-3.5 w-3.5 text-white" />}
                     </button>
                   ))}
                 </div>
               )}
 
               {openMenu === 'subtitles' && (
-                <div className="player-interactive absolute right-0 bottom-12 w-56 rounded-2xl liquid-glass-strong p-1.5 max-h-72 overflow-y-auto touch-auto">
+                <div className="player-interactive absolute right-0 bottom-12 w-60 max-w-[calc(100vw-2rem)] rounded-2xl liquid-glass-strong p-2 space-y-1 max-h-72 overflow-y-auto shadow-2xl z-40 touch-auto">
+                  <p className="px-3 py-1.5 text-xs font-semibold text-slate-300 border-b border-white/10">
+                    Subtitles
+                  </p>
                   <button
                     type="button"
                     onClick={() => {
                       setActiveSubtitleId('off');
                       setOpenMenu('none');
                     }}
-                    className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors ${
+                    className={`w-full text-left px-3 py-2 rounded-xl text-xs flex items-center justify-between transition-colors ${
                       activeSubtitleId === 'off'
                         ? 'text-white font-semibold shadow-md'
                         : 'text-slate-200 hover:bg-white/10'
@@ -3153,7 +4218,8 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                         : undefined
                     }
                   >
-                    Off
+                    <span>Off</span>
+                    {activeSubtitleId === 'off' && <Check className="h-3.5 w-3.5 text-white" />}
                   </button>
                   {subtitles.map((sub, idx) => (
                     <button
@@ -3163,7 +4229,7 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                         setActiveSubtitleId(sub.id);
                         setOpenMenu('none');
                       }}
-                      className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors ${
+                      className={`w-full text-left px-3 py-2 rounded-xl text-xs flex items-center justify-between transition-colors ${
                         activeSubtitleId === sub.id
                           ? 'text-white font-semibold shadow-md'
                           : 'text-slate-200 hover:bg-white/10'
@@ -3174,92 +4240,91 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                           : undefined
                       }
                     >
-                      {sub.label}
+                      <span className="truncate">{sub.label}</span>
+                      {activeSubtitleId === sub.id && <Check className="h-3.5 w-3.5 text-white shrink-0" />}
                     </button>
                   ))}
                 </div>
               )}
 
               {openMenu === 'quality' && (
-                <div className="player-interactive absolute right-0 bottom-12 w-72 rounded-2xl liquid-glass-strong p-2 space-y-2 max-h-72 overflow-y-auto touch-auto">
-                  {hlsLevels.length > 0 && (
-                    <div className="space-y-1">
-                      <p className="px-2 py-1 text-[11px] font-semibold text-slate-400">
-                        Adaptive HLS Resolution
-                      </p>
+                <div className="player-interactive absolute right-0 bottom-12 w-72 max-w-[calc(100vw-2rem)] rounded-2xl liquid-glass-strong p-2 space-y-1 max-h-80 overflow-y-auto touch-auto shadow-2xl z-40">
+                  <div className="px-3 py-1.5 border-b border-white/10 flex items-center justify-between">
+                    <span className="text-xs font-semibold text-slate-300">
+                      Video Quality
+                    </span>
+                    {hlsLevels.length > 0 && (
+                      <span className="text-[11px] text-emerald-400 font-mono-tabular">Adaptive</span>
+                    )}
+                  </div>
+
+                  {hlsLevels.length > 0 ? (
+                    <div className="space-y-1 pt-1">
                       <button
                         type="button"
-                        onClick={() => selectQualityLevel(-1)}
-                        className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors ${
+                        onClick={() => {
+                          selectQualityLevel(-1);
+                          setSelectedQualityOption('auto');
+                        }}
+                        className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition-colors ${
                           selectedHlsLevel === -1
                             ? 'text-white font-semibold shadow-md'
                             : 'text-slate-200 hover:bg-white/10'
                         }`}
-                        style={
-                          selectedHlsLevel === -1
-                            ? { backgroundColor: accent.hex }
-                            : undefined
-                        }
+                        style={selectedHlsLevel === -1 ? { backgroundColor: accent.hex } : undefined}
                       >
-                        Auto (Adaptive)
+                        <span>Auto (Adaptive)</span>
+                        {selectedHlsLevel === -1 && <Check className="h-4 w-4 text-white" />}
                       </button>
-                      {hlsLevels.map((lvl) => (
-                        <button
-                          key={lvl.index}
-                          type="button"
-                          onClick={() => selectQualityLevel(lvl.index)}
-                          className={`w-full text-left px-3 py-2 rounded-lg text-xs font-mono-tabular transition-colors ${
-                            selectedHlsLevel === lvl.index
-                              ? 'text-white font-semibold shadow-md'
-                              : 'text-slate-200 hover:bg-white/10'
-                          }`}
-                          style={
-                            selectedHlsLevel === lvl.index
-                              ? { backgroundColor: accent.hex }
-                              : undefined
-                          }
-                        >
-                          {lvl.label}
-                        </button>
-                      ))}
+                      {hlsLevels.map((lvl) => {
+                        const isActive = selectedHlsLevel === lvl.index;
+                        return (
+                          <button
+                            key={lvl.index}
+                            type="button"
+                            onClick={() => {
+                              selectQualityLevel(lvl.index);
+                              setSelectedQualityOption(lvl.label);
+                            }}
+                            className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between font-mono-tabular transition-colors ${
+                              isActive
+                                ? 'text-white font-semibold shadow-md'
+                                : 'text-slate-200 hover:bg-white/10'
+                            }`}
+                            style={isActive ? { backgroundColor: accent.hex } : undefined}
+                          >
+                            <span>{lvl.label}</span>
+                            {isActive && <Check className="h-4 w-4 text-white" />}
+                          </button>
+                        );
+                      })}
                     </div>
-                  )}
-
-                  {sources.length > 1 && (
-                    <div className="space-y-1 pt-1 border-t border-white/10">
-                      <p className="px-2 py-1 text-[11px] font-semibold text-slate-400">
-                        Stream Source Provider
-                      </p>
-                      {sources.map((src, idx) => (
-                        <button
-                          key={`${src.id}-${idx}`}
-                          type="button"
-                          onClick={() => {
-                            const curPos =
-                              seekOffsetSecondsRef.current + (videoRef.current?.currentTime || 0) ||
-                              resumePositionRef.current;
-                            if (curPos > 0) resumePositionRef.current = curPos;
-                            setStreamError(null);
-                            setActiveSource(src);
-                            setOpenMenu('none');
-                          }}
-                          className={`w-full text-left px-3 py-2 rounded-lg text-xs transition-colors ${
-                            activeSource?.id === src.id
-                              ? 'text-white font-semibold shadow-md'
-                              : 'text-slate-200 hover:bg-white/10'
-                          }`}
-                          style={
-                            activeSource?.id === src.id
-                              ? { backgroundColor: accent.hex }
-                              : undefined
-                          }
-                        >
-                          <div className="truncate">{src.label}</div>
-                          <div className="text-[11px] opacity-75">
-                            {src.providerName} · {src.audioLanguage || 'Original'}
-                          </div>
-                        </button>
-                      ))}
+                  ) : (
+                    <div className="space-y-1 pt-1">
+                      {QUALITY_PRESETS.map((q) => {
+                        const isActive = selectedQualityOption === q.id;
+                        return (
+                          <button
+                            key={q.id}
+                            type="button"
+                            onClick={() => handleSelectQuality(q.id)}
+                            className={`w-full text-left px-3.5 py-2.5 rounded-xl text-xs font-medium flex items-center justify-between transition-colors ${
+                              isActive
+                                ? 'text-white font-semibold shadow-md'
+                                : 'text-slate-200 hover:bg-white/10'
+                            }`}
+                            style={isActive ? { backgroundColor: accent.hex } : undefined}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span>{q.label}</span>
+                              <span className="text-[11px] text-slate-300 opacity-80">
+                                {q.badge}
+                              </span>
+                            </div>
+                            {isActive && <Check className="h-4 w-4 text-white" />}
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -3267,11 +4332,11 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
             </div>
           </div>
         ) : (
-          <div className="pb-6 flex justify-center">
+          <div className="pb-7 flex justify-center">
             <button
               type="button"
               onClick={() => setIsLocked(false)}
-              className="min-h-[42px] px-5 rounded-full liquid-glass-strong border border-white/25 text-xs font-semibold text-white inline-flex items-center gap-2 shadow-xl"
+              className="min-h-[44px] px-5 rounded-full liquid-glass-strong border border-white/25 text-xs font-semibold text-white inline-flex items-center gap-2 shadow-2xl active:scale-95 transition-transform"
             >
               <Unlock className="h-4 w-4" />
               <span>Screen Locked · Tap to Unlock</span>
@@ -3295,8 +4360,8 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
             <h3 className="font-display text-base font-bold text-white leading-tight">Sources</h3>
             <p className="text-[10px] font-mono-tabular text-slate-400">
               {isResolvingStreams
-                ? `Searching providers · ${sources.length} ready`
-                : `${filteredDrawerSources.length} of ${sources.length} servers`}
+                ? `Searching streams · ${sources.length} ready`
+                : `${filteredDrawerSources.length} of ${sources.length} streams`}
             </p>
           </div>
         </div>
@@ -3332,19 +4397,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
         </div>
       </div>
 
-      {/* Drawer Filters: Type, Provider, Language & Quality */}
+      {/* Drawer Filters: Type, Language & Quality */}
       {sources.length > 1 && (
         <div className="px-3 py-2.5 border-b border-white/10 bg-black/30 space-y-2">
           <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
             <Filter className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
             {(
               [
-                { id: 'all', label: 'All', show: true },
-                { id: 'direct', label: 'Direct', show: sources.some((s) => getSourceFlags(s).isDirectInstant) },
-                { id: 'nuvio', label: 'Nuvio', show: sources.some((s) => getSourceFlags(s).isNuvio) },
-                { id: 'stremio', label: 'Stremio', show: sources.some((s) => getSourceFlags(s).isStremio) },
-                { id: 'cloudstream', label: 'CloudStream', show: sources.some((s) => getSourceFlags(s).isCS) },
-                { id: 'p2p', label: 'P2P', show: sources.some((s) => getSourceFlags(s).isP2P) },
+                { id: 'all', label: 'All Streams', show: true },
+                { id: 'direct', label: 'Direct Stream', show: sources.some((s) => getSourceFlags(s).isDirectInstant) },
+                { id: 'p2p', label: 'P2P Torrent', show: sources.some((s) => getSourceFlags(s).isP2P) },
               ] as const
             )
               .filter((t) => t.show)
@@ -3353,9 +4415,9 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                   key={t.id}
                   type="button"
                   onClick={() => setDrawerTypeFilter(t.id)}
-                  className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold shrink-0 border transition-colors ${
                     drawerTypeFilter === t.id
-                      ? 'bg-white text-slate-900 border-white'
+                      ? 'bg-white text-slate-900 border-white shadow-sm'
                       : 'bg-white/[0.06] text-slate-300 border-white/10 hover:bg-white/10'
                   }`}
                 >
@@ -3364,57 +4426,27 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
               ))}
           </div>
 
-          {drawerProviders.length > 1 && (
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
-              <button
-                type="button"
-                onClick={() => setDrawerProviderFilter('All')}
-                className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
-                  drawerProviderFilter === 'All'
-                    ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50'
-                    : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
-                }`}
-              >
-                All Providers
-              </button>
-              {drawerProviders.map(({ name, count }) => (
-                <button
-                  key={name}
-                  type="button"
-                  onClick={() => setDrawerProviderFilter(name)}
-                  className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
-                    drawerProviderFilter === name
-                      ? 'bg-emerald-500/25 text-emerald-200 border-emerald-400/50'
-                      : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
-                  }`}
-                >
-                  {name} ({count})
-                </button>
-              ))}
-            </div>
-          )}
-
           <div className="flex items-center gap-1.5 overflow-x-auto">
             {drawerLanguages.length > 1 && (
               <>
                 <button
                   type="button"
                   onClick={() => setDrawerLanguageFilter('All')}
-                  className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
+                  className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold shrink-0 border transition-colors ${
                     drawerLanguageFilter === 'All'
                       ? 'text-white border-transparent'
                       : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
                   }`}
                   style={drawerLanguageFilter === 'All' ? { backgroundColor: accent.hex } : undefined}
                 >
-                  All Lang
+                  All Audio
                 </button>
                 {drawerLanguages.map(({ lang }) => (
                   <button
                     key={lang}
                     type="button"
                     onClick={() => setDrawerLanguageFilter(lang)}
-                    className={`px-2 py-0.5 rounded-md text-[10px] font-semibold shrink-0 border transition-colors ${
+                    className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold shrink-0 border transition-colors ${
                       drawerLanguageFilter === lang
                         ? 'text-white border-transparent'
                         : 'bg-white/[0.05] text-slate-300 border-white/10 hover:bg-white/10'
@@ -3451,12 +4483,12 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
           <div className="p-6 rounded-2xl bg-black/40 border border-white/10 text-center space-y-3">
             <Loader2 className="h-6 w-6 animate-spin text-slate-300 mx-auto" />
             <p className="text-xs text-slate-300">
-              Searching PlavioHD, Nuvio & Stremio providers...
+              Searching live video streams...
             </p>
           </div>
         ) : filteredDrawerSources.length === 0 ? (
           <div className="p-5 rounded-2xl bg-black/40 border border-white/10 text-center space-y-3">
-            <p className="text-xs text-slate-300">No servers match the selected filters.</p>
+            <p className="text-xs text-slate-300">No streams match the selected filters.</p>
             {hasDrawerFilter && (
               <button
                 type="button"
@@ -3477,15 +4509,16 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                 key={`${src.id}-${idx}`}
                 type="button"
                 onClick={() => {
-                  const curPos =
-                    seekOffsetSecondsRef.current + (videoRef.current?.currentTime || 0) ||
-                    resumePositionRef.current;
-                  if (curPos > 0) resumePositionRef.current = curPos;
+                  const curPos = getAbsolutePlaybackPosition();
+                  if (curPos > 3) resumePositionRef.current = curPos;
                   userSelectedSourceRef.current = true;
                   p2pBypassForSourceRef.current = null;
+                  qualityBaseSourceRef.current = null;
+                  pendingQualityFallbackRef.current = null;
+                  setSelectedQualityOption('auto');
                   setStreamError(null);
                   setIsBuffering(true);
-                  setActiveSource(src);
+                  setActiveSource(prepareSourceWithResume(src, curPos));
                   setOpenMenu('none');
                 }}
                 className={`w-full text-left p-3 rounded-2xl border transition-all space-y-2 ${
@@ -3501,15 +4534,15 @@ export const VideoPlayerScreen: React.FC<VideoPlayerScreenProps> = ({ session })
                 )}
 
                 <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs sm:text-sm font-semibold text-white truncate">
-                    {src.providerName} {src.seeders !== undefined ? `| ${src.seeders}` : ''} | {src.quality}
+                  <p className="font-display text-xs sm:text-sm font-semibold text-white truncate">
+                    {src.audioLanguage ? `${src.audioLanguage} Audio` : 'Original Audio'} · {src.quality || 'HD'}{src.seeders !== undefined ? ` · ${src.seeders} seeders` : ''}
                   </p>
                   {isActive && (
                     <Check className="h-4 w-4 shrink-0 text-emerald-400" />
                   )}
                 </div>
 
-                <p className="text-[11px] text-slate-300 truncate">{src.label}</p>
+                <p className="text-[11px] text-slate-300 truncate">{cleanStreamTitle(src.label)}</p>
 
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <span className="px-2 py-0.5 rounded-md bg-white/10 text-[10px] font-semibold text-white">

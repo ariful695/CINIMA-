@@ -106,22 +106,20 @@ export function getAvailableProviders(sources: StreamSource[]): Array<{ name: st
 }
 
 export function getAvailableLanguages(sources: StreamSource[]): Array<{ lang: string; count: number }> {
-  const counts: Record<string, number> = {};
+  const counts: Record<string, number> = { English: 0, Hindi: 0 };
   for (const s of sources) {
     const tags = extractLanguageTags(s.audioLanguage);
     for (const tag of tags) {
-      counts[tag] = (counts[tag] || 0) + 1;
+      const lower = tag.toLowerCase();
+      if (lower.includes('english') || lower.includes('eng')) {
+        counts['English'] = (counts['English'] || 0) + 1;
+      } else if (lower.includes('hindi') || lower.includes('hin') || lower.includes('bolly')) {
+        counts['Hindi'] = (counts['Hindi'] || 0) + 1;
+      }
     }
   }
-  const order = ['Hindi', 'English', 'Bengali', 'Tamil', 'Telugu', 'Malayalam', 'Kannada'];
-  return Object.entries(counts)
-    .sort(([a], [b]) => {
-      const ia = order.indexOf(a);
-      const ib = order.indexOf(b);
-      if (ia !== -1 || ib !== -1) {
-        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
-      }
-      return a.localeCompare(b);
-    })
-    .map(([lang, count]) => ({ lang, count }));
+  return [
+    { lang: 'English', count: counts['English'] },
+    { lang: 'Hindi', count: counts['Hindi'] },
+  ].filter((item) => item.count > 0);
 }

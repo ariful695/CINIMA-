@@ -109,14 +109,20 @@ export const SearchScreen: React.FC = () => {
       return;
     }
 
+    const cleanTitleOnly =
+      debouncedQuery
+        .replace(/\s*[\(\[]\s*(?:19|20)\d{2}\s*[\)\]]\s*$/, '')
+        .replace(/^(.{2,}?)\s+(?:19|20)\d{2}$/, '$1')
+        .trim() || debouncedQuery;
+
     const controller = new AbortController();
     const runSearch = async () => {
       setLoading(true);
       const [tmdbData, dejavuResults, archiveResults, bengaliResults] = await Promise.all([
         tmdbService.searchMulti(debouncedQuery),
-        dejavuApiService.search(debouncedQuery),
-        archiveMovieService.searchArchiveMovies(debouncedQuery),
-        bengaliSerialService.search(debouncedQuery),
+        dejavuApiService.search(cleanTitleOnly),
+        archiveMovieService.searchArchiveMovies(cleanTitleOnly),
+        bengaliSerialService.search(cleanTitleOnly),
       ]);
       if (controller.signal.aborted) return;
 
